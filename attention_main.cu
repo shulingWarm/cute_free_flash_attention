@@ -11,7 +11,6 @@ using u32=unsigned int;
 template<class T, // 数据类型
     u32 HEAD_NUM=128, // 头的数量
     u32 HEAD_DIM=128, // 头的维度
-    u32 SEQ_PICK_NUM=16, // 每个线程块在seq维度取出的query的数量
     u32 MMA_M_SIZE=16,
     u32 MMA_N_SIZE=8,
     u32 MMA_K_SIZE=16,
@@ -34,6 +33,9 @@ __global__ void flash_attention(
     // 编译检查T的大小是2字节，目前只支持bf16和fp16
     static_assert(sizeof(T) == 2, "only bf16 and fp16 are supported");
 
+    constexpr u32 U32_MMA_K_SIZE = MMA_K_SIZE * sizeof(T) / sizeof(u32); // 参考值: 16*2/4=8
+    constexpr u32 U32_HEAD_DIM = HEAD_DIM * sizeof(T) / sizeof(u32); // 参考值: 128*2/4=64
+
     // 每次调用mma时的矩阵的大小
     constexpr u32 MMA_A_SIZE = MMA_M_SIZE * MMA_K_SIZE; // 参考值: 16*16=256
     constexpr u32 MMA_B_SIZE = MMA_N_SIZE * MMA_K_SIZE; // 参考值: 16*8=128
@@ -44,17 +46,26 @@ __global__ void flash_attention(
     constexpr u32 MMA_B_THREAD_SIZE = MMA_B_SIZE / WARP_SIZE; // 参考值: 128/32=4
     constexpr u32 MMA_C_THREAD_SIZE = MMA_C_SIZE / WARP_SIZE; // 参考值: 128/32=4
 
+    // MMA在K方向的循环次数
+    constexpr u32 MMA_K_LOOP_NUM = HEAD_DIM / MMA_K_SIZE; // 参考值: 128/16=8
+
     // 用u32的形式加载时候的加载量
     constexpr u32 U32_MMA_A_THREAD_SIZE = MMA_A_THREAD_SIZE * sizeof(u32) / sizeof(T); // 参考值: 8*2/4=4
     constexpr u32 U32_MMA_B_THREAD_SIZE = MMA_B_THREAD_SIZE * sizeof(u32) / sizeof(T); // 参考值: 4*2/4=2
 
-    // 执行query从global复制到shared的过程中，每个线程负责的数据量
-    constexpr u32 QUERY_THREAD_COPY_SIZE = (SEQ_PICK_NUM * HEAD_DIM) / THREAD_NUM; // 参考值: (16*128)/128=16
-    // 线程内的寄存器使用量
+    // 每个线程块需要加载的query数据量
+    constexpr u32 QUERY_BLOCK_LOAD_SIZE = MMA_N_SIZE * HEAD_DIM * WARP_NUM; // 参考值: 8*128*4=4096
+    // 对于同一个head，划分出来的block数量 这里指的是加载的block数量
+    constexpr u32 BLOCK_NUM_IN_HEAD = HEAD_DIM*sizeof(T)/128; // 参考值: 128*2/128=2
+    // 每次加载KV时的加载量
+    constexpr u32 KV_BLOCK_LOAD_SIZE = MMA_M_SIZE * HEAD_DIM; // 参考值: 16*128=2048
+    // 将query从global复制到shared的过程中，每个线程负责的数据量
+    constexpr u32 QUERY_THREAD_COPY_SIZE = (QUERY_BLOCK_LOAD_SIZE) / THREAD_NUM; // 参考值: 4096/128=32
+    // 编译检查每个warp的加载量刚好等于每一组query的数据量
+    static_assert(QUERY_THREAD_COPY_SIZE*sizeof(T) == MMA_N_SIZE*BLOCK_NUM_IN_HEAD*4, "QUERY_BLOCK_LOAD_SIZE must be equal to MMA_N_SIZE*BLOCK_NUM_IN_HEAD*4");
+    constexpr u32 U32_QUERY_THREAD_COPY_SIZE = QUERY_THREAD_COPY_SIZE * sizeof(u32) / sizeof(T); // 参考值: 32*2/4=16
+    // 执行mma计算的时候寄存器的使用量
     constexpr u32 THREAD_REG_SIZE = MMA_A_THREAD_SIZE + MMA_B_THREAD_SIZE + MMA_C_THREAD_SIZE; // 参考值: 8+4+4=16
-    // 静态检查寄存器数量大于等于每个线程负责的数据量
-    static_assert(THREAD_REG_SIZE >= QUERY_THREAD_COPY_SIZE, 
-        "register size is smaller than thread copy size");
 
     // 准备三个矩阵的寄存器，用于参与mma计算
     T all_reg_ptr[THREAD_REG_SIZE];
@@ -69,29 +80,62 @@ __global__ void flash_attention(
     constexpr u32 QUERY_THREAD_COPY_U32 = QUERY_THREAD_COPY_SIZE * sizeof(T) / sizeof(u32); // 参考值: 16*2/4=8
 
     // KV的seq_len长度的循环次数
-    u32 seq_len_loop_num = seq_len / MMA_N_SIZE;
+    u32 seq_len_loop_num = seq_len / MMA_A_SIZE;
     // head_dim维度的循环次数
     constexpr u32 HEAD_DIM_LOOP_NUM = HEAD_DIM / MMA_K_SIZE; // 参考值: 128/16=8
-    // 共享内存中用于存储query的大小
-    constexpr u32 QUERY_SHARED_SIZE = SEQ_PICK_NUM * HEAD_DIM; // 参考值: 16*128=2048
-
-    // 一组KV数据的大小，这里指的是一整列head_dim的KV数据的大小
-    constexpr u32 KV_LOAD_SIZE = MMA_N_SIZE * HEAD_DIM; // 参考值: 8*128=1024
-    // 加载KV的时候，每个线程负责加载的数据量
-    constexpr u32 KV_LOAD_THREAD_SIZE = KV_LOAD_SIZE / THREAD_NUM; // 参考值: 1024/128=8
-    constexpr u32 U32_KV_LOAD_THREAD_SIZE = KV_LOAD_THREAD_SIZE * sizeof(T) / sizeof(u32); // 参考值: 8*2/4=4
-    // 加载KV用的寄存器
-    T kv_load_reg[KV_LOAD_THREAD_SIZE];
-    u32* u32_kv_load_reg = (u32*)kv_load_reg;
 
     // 用于记录query的shared memory
     // 关于KV_LOAD_SIZE*2 表示分别加载KV
-    __shared__ T all_shared[QUERY_SHARED_SIZE + KV_LOAD_SIZE*2];
+    __shared__ T all_shared[QUERY_BLOCK_LOAD_SIZE + KV_BLOCK_LOAD_SIZE];
     // query版本的32头指针
     u32* query_shared_u32_ptr = (u32*)all_shared;
-    // kv的两组缓冲区
-    T* kv_shared_1 = all_shared + QUERY_SHARED_SIZE;
-    T* kv_shared_2 = kv_shared_1 + KV_LOAD_SIZE;
+
+    // 将query从全局内存复制到共享内存
+    {
+        // 当前线程访问的query数据的头指针
+        T* thread_query_head = query + blockIdx.z * seq_len * HEAD_NUM * HEAD_DIM + 
+            blockIdx.y * seq_len * HEAD_DIM + 
+            (blockIdx.x * WARP_NUM + id_warp) * HEAD_DIM * MMA_N_SIZE;
+        u32* u32_thread_query_head = (u32*)thread_query_head;
+        // 当前warp访问的共享内存的起始地址
+        T* query_shared_head = all_shared + id_warp * MMA_N_SIZE * HEAD_DIM;
+        u32* u32_query_shared_head = (u32*)query_shared_head;
+
+        // 用于复制全局内存的寄存器
+        u32 query_copy_reg[U32_QUERY_THREAD_COPY_SIZE];
+
+        // 每个线程按顺序读取数据
+        for(u32 id_seq=0;id_seq<MMA_N_SIZE; ++id_seq) {
+            // 计算本线程应该在当前block中处理的位置
+            u32 offset_in_block = (id_seq&3) ^ (in_warp_offset >> 3);
+            // 对于每个序列，遍历它的每个block
+            #pragma unroll
+            for(u32 id_block=0;id_block<BLOCK_NUM_IN_HEAD; ++id_block) {
+                asm volatile(
+                    "ld.global.cg.b32 %0, [%1];\n"
+                    : "=r"(query_copy_reg[id_seq*BLOCK_NUM_IN_HEAD + id_block])
+                    : "l"(u32_thread_query_head + 
+                        id_seq*U32_HEAD_DIM + 
+                        id_block*WARP_SIZE + 
+                        offset_in_block*U32_MMA_K_SIZE + 
+                        (in_warp_offset%U32_MMA_K_SIZE))
+                )
+            }
+        }
+
+        // 将query从寄存器复制到共享内存
+        for(u32 id_mma_loop=0;id_mma_loop<MMA_K_LOOP_NUM; ++id_mma_loop) {
+            // 遍历当前mma切片的每个block
+            for(u32 id_block=0;id_block<BLOCK_NUM_IN_HEAD; ++id_block) {
+                // 计算当前线程持有的数据在当前切片中属于哪一行
+                u32 in_block_row = ((in_warp_offset>>3) ^ (id_mma_loop&3))&3;
+                // 将数据写入到共享内存
+                u32_query_shared_head[(id_block_row + 4*id_block)*U32_HEAD_DIM + 
+                    id_mma_loop*8 + in_warp_offset&7] = 
+                    query_copy_reg[(in_block_row + 4*id_block)*2 + id_mma_loop/4];
+            }
+        }
+    }
 
 
     // blockIdx.x 是query_pick方向的id
@@ -222,7 +266,6 @@ int main() {
     flash_attention<MainType, // 数据类型
         HEAD_NUM, // 头的数量
         HEAD_DIM, // 头的维度
-        16, // 每个线程块在seq维度取出的query的数量
         16, // MMA_M_SIZE
         16, // MMA_N_SIZE
         16  // MMA_K_SIZE
