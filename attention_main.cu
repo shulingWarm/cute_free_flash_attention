@@ -119,7 +119,7 @@ __global__ void flash_attention(
                         id_block*WARP_SIZE + 
                         offset_in_block*U32_MMA_K_SIZE + 
                         (in_warp_offset%U32_MMA_K_SIZE))
-                )
+                );
             }
         }
 
@@ -130,7 +130,7 @@ __global__ void flash_attention(
                 // 计算当前线程持有的数据在当前切片中属于哪一行
                 u32 in_block_row = ((in_warp_offset>>3) ^ (id_mma_loop&3))&3;
                 // 将数据写入到共享内存
-                u32_query_shared_head[(id_block_row + 4*id_block)*U32_HEAD_DIM + 
+                u32_query_shared_head[(in_block_row + 4*id_block)*U32_HEAD_DIM + 
                     id_mma_loop*8 + in_warp_offset&7] = 
                     query_copy_reg[(in_block_row + 4*id_block)*2 + id_mma_loop/4];
             }
@@ -138,103 +138,6 @@ __global__ void flash_attention(
     }
 
 
-    // blockIdx.x 是query_pick方向的id
-    // blockIdx.y 是head_id
-    // blockIdx.z 是batch_id
-
-    // 当前的线程块要加载的query tensor的头指针
-    T* query_block_ptr = query + blockIdx.z * seq_len * HEAD_NUM * HEAD_DIM + 
-        blockIdx.y * seq_len * HEAD_DIM + 
-        blockIdx.x * HEAD_DIM * SEQ_PICK_NUM;
-    // 当前block的kv 头指针
-    T* key_block_ptr = key + blockIdx.z * seq_len * HEAD_NUM * HEAD_DIM + 
-        blockIdx.y * seq_len * HEAD_DIM;
-    T* value_block_ptr = value + blockIdx.z * seq_len * HEAD_NUM * HEAD_DIM + 
-        blockIdx.y * seq_len * HEAD_DIM;
-
-    // 依次遍历每个需要被复制到寄存器的数据
-    #pragma unroll
-    for(u32 id_query_copy=0;id_query_copy<QUERY_THREAD_COPY_U32; ++id_query_copy) {
-        asm volatile(
-            "ld.global.cg.b32 %0, [%1];\n"
-            : "=r"(u32_mma_a_reg[id_query_copy])
-            : "l"(query_block_ptr + id_query_copy * THREAD_NUM + threadIdx.x)
-        );
-    }
-
-    // 将query从寄存器复制到共享内存中
-    {
-        // 当前warp的线程复制到目标共享内存的起始地址
-        u32* query_copy_target_for_warp = query_shared_u32_ptr + 
-            id_warp * QUERY_THREAD_COPY_U32*WARP_SIZE + in_warp_offset;
-
-        #pragma unroll
-        for(u32 id_query_copy=0; id_query_copy<QUERY_THREAD_COPY_U32; ++id_query_copy) {
-            query_copy_target_for_warp[id_query_copy*WARP_SIZE] = 
-                u32_mma_a_reg[id_query_copy];
-        }
-    }
-
-    // 复制K数据
-    {
-        // 当前warp的头指针
-        T* key_head = key_block_ptr + id_warp * WARP_SIZE*KV_LOAD_THREAD_SIZE + in_warp_offset*sizeof(u32)/sizeof(T);
-        u32* u32_key_head = (u32*)key_head;
-        // 依次将每个数据从全局内存复制到寄存器里面
-        #pragma unroll
-        for(u32 id_load=0;id_load<U32_KV_LOAD_THREAD_SIZE; ++id_load) {
-            asm volatile(
-                "ld.global.cg.b32 %0, [%1];\n"
-                : "=r"(u32_kv_load_reg[id_load])
-                : "l"(u32_key_head + id_load * WARP_SIZE)
-            );
-        }
-
-        // 将寄存器中的数据复制到共享内存
-        T* warp_shared_head = kv_shared_1 + id_warp * KV_LOAD_THREAD_SIZE*WARP_SIZE + KV_LOAD_THREAD_SIZE*in_warp_offset;
-        u32* u32_warp_shared_head = (u32*)warp_shared_head;
-        #pragma unroll
-        for(u32 id_store=0; id_store<U32_KV_LOAD_THREAD_SIZE; ++id_store) {
-            u32_warp_shared_head[id_store*WARP_SIZE] = u32_kv_load_reg[id_store];
-        }
-    }
-    
-
-    // 执行计算的主循环体
-    // 序列方向的循环层
-    for(u32 id_seq_step=0; id_seq_step<seq_len_loop_num; ++id_seq_step) {
-        // 调用同步
-        __syncthreads();
-
-        // 遍历K方向的每一次计算
-        for(u32 id_compute=0;id_compute<HEAD_DIM_LOOP_NUM; ++id_compute) {
-            // 从共享内存里面读取query
-            #pragma unroll
-            for(u32 id_query_load=0; id_query_load<U32_MMA_A_THREAD_SIZE; ++id_query_load) {
-                // 当前实际要加载的id
-                // 对于线程0~15，id是0,1,2,3
-                // 对于线程16~31, id是2,3,0,1
-                u32 id_query_load_real = (id_query_load + ((id_query_load&0x10)>>3))&0x3;
-                // 在共享内存里访问位置的偏移量:
-                // ((id%2)*8+tid/4)*8 + (id/2)*4 + tid%4
-                // 用位运算化简之后的表达式：((id & 1) << 6) | ((tid & 0x1C) << 1) | ((id & 2) << 1) | (tid & 3)
-                asm volatile(
-                    "ld.shared.cg.b32 %0, [%1];\n"
-                    : "=r"(u32_mma_a_reg[id_query_load_real])
-                    : "l"(query_shared_u32_ptr + (((id_query_load_real & 1) << 6) | 
-                        ((in_warp_offset & 0x1C) << 1) | 
-                        ((id_query_load_real & 2) << 1) | 
-                        (in_warp_offset & 3)))
-                );
-            }
-
-            // 从共享内存里读取K
-            #pragma unroll
-            for(u32 id_load=0;id_load<U32_MMA_B_THREAD_SIZE; ++id_load) {
-                
-            }
-        }
-    }
 }
 
 int main() {
