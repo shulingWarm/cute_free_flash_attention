@@ -52,3 +52,11 @@ void init_matrix_with_length(T *tensor, int length, UniformRandomGenerator& gene
         tensor[i] = (T)generator.generate(-0.5, 0.5);
     }
 }
+
+// 初始化按顺序赋值的矩阵
+template<class T>
+void init_matrix_with_order(T *matrix, int length, int max_value) {
+    for (int i = 0; i < length; i++) {
+        matrix[i] = (T)(i % max_value);
+    }
+}

@@ -7,6 +7,8 @@ using bf16 = cutlass::bfloat16_t;
 
 using u32=unsigned int;
 
+#define DEBUG_FLAG
+
 // flash attention的核函数
 template<class T, // 数据类型
     u32 HEAD_NUM=128, // 头的数量
@@ -23,6 +25,10 @@ __global__ void flash_attention(
     T* value, // [batch, num_heads, seq_len, head_dim]
     T* output, // [batch, num_heads, seq_len, head_dim]
     u32 seq_len
+#ifdef DEBUG_FLAG
+    ,
+    u32* debug_tensor // 用来存储中间结果
+#endif
 ) {
     // 总的线程数
     constexpr u32 THREAD_NUM = WARP_NUM * WARP_SIZE; // 参考值: 4*32=128
@@ -123,6 +129,16 @@ __global__ void flash_attention(
             }
         }
 
+#ifdef DEBUG_FLAG
+        // 将某个block里面的寄存器数据写入debug_tensor
+        if(blockIdx.x==12 && blockIdx.y==0 && blockIdx.z==0 && id_warp==0) {
+            // 记录每个线程的16个数据
+            for(u32 id_data=0;id_data<16;++id_data) {
+                debug_tensor[id_data*32 + in_warp_offset] = query_copy_reg[id_data];
+            }
+        }
+#endif
+
         // 将query从寄存器复制到共享内存
         for(u32 id_mma_loop=0;id_mma_loop<MMA_K_LOOP_NUM; ++id_mma_loop) {
             // 遍历当前mma切片的每个block
@@ -149,6 +165,9 @@ int main() {
     constexpr u32 TOTAL_SIZE = BATCH_NUM * SEQ_LEN * HEAD_NUM * HEAD_DIM;
     constexpr u32 THREAD_PER_BLOCK = 128;
 
+    // 使用debug矩阵的情况下，将矩阵改成使用顺序赋值
+    constexpr bool USE_DEBUG_MAT = true;
+
     using MainType = bf16;
 
     // 初始化qkvo 四个tensor，大小都相同 
@@ -159,9 +178,21 @@ int main() {
 
     // 随机初始化qkv的值
     UniformRandomGenerator rand_gen;
-    init_matrix_with_length<MainType>(query, TOTAL_SIZE, rand_gen);
-    init_matrix_with_length<MainType>(key, TOTAL_SIZE, rand_gen);
-    init_matrix_with_length<MainType>(value, TOTAL_SIZE, rand_gen);
+    if (USE_DEBUG_MAT) {
+        init_matrix_with_order<MainType>(query, TOTAL_SIZE, 4096);
+        init_matrix_with_order<MainType>(key, TOTAL_SIZE, 4096);
+        init_matrix_with_order<MainType>(value, TOTAL_SIZE, 4096);
+    } else {
+        init_matrix_with_length<MainType>(query, TOTAL_SIZE, rand_gen);
+        init_matrix_with_length<MainType>(key, TOTAL_SIZE, rand_gen);
+        init_matrix_with_length<MainType>(value, TOTAL_SIZE, rand_gen);
+    }
+
+    // 初始化用于debug的矩阵
+#ifdef DEBUG_FLAG
+    // 初始化cuda版本的矩阵
+    u32* debug_tensor = (u32*)malloc(16 * 32 * sizeof(u32));
+#endif
 
     // 调用flash attention核函数，每个线程块128个线程
     dim3 grid_dim(SEQ_LEN / 16, HEAD_NUM, BATCH_NUM);
@@ -178,5 +209,20 @@ int main() {
         value,
         output,
         SEQ_LEN
+#ifdef DEBUG_FLAG
+        , debug_tensor
+#endif
     );
+
+#ifdef DEBUG_FLAG
+    // 把debug tensor复制到cpu上
+    u32* debug_tensor_cpu = (u32*)malloc(16 * 32 * sizeof(u32));
+    cudaMemcpy(debug_tensor_cpu, debug_tensor, 16 * 32 * sizeof(u32), cudaMemcpyDeviceToHost);
+    for(u32 id_data=0;id_data<16;++id_data) {
+        printf("debug_tensor[%d]:\n", id_data);
+        for(u32 id_row=0;id_row<32;++id_row) {
+            printf("%d: %x\n", id_row, debug_tensor_cpu[id_data*32 + id_row]);
+        }
+    }
+#endif
 }
