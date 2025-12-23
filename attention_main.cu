@@ -131,10 +131,10 @@ __global__ void flash_attention(
 
 #ifdef DEBUG_FLAG
         // 将某个block里面的寄存器数据写入debug_tensor
-        if(blockIdx.x==12 && blockIdx.y==0 && blockIdx.z==0 && id_warp==0) {
-            // 记录每个线程的16个数据
-            for(u32 id_data=0;id_data<16;++id_data) {
-                debug_tensor[id_data*32 + in_warp_offset] = query_copy_reg[id_data];
+        if(blockIdx.x==12 && blockIdx.y==0 && blockIdx.z==0 && threadIdx.x==0) {
+            // 记录全局内存里的数据
+            for(u32 id_data=0;id_data<512;++id_data) {
+                debug_tensor[id_data] = u32_query_shared_head[id_data];
             }
         }
 #endif
@@ -190,9 +190,25 @@ int main() {
 
     // 初始化用于debug的矩阵
 #ifdef DEBUG_FLAG
-    // 初始化cuda版本的矩阵
-    u32* debug_tensor = (u32*)malloc(16 * 32 * sizeof(u32));
+    // 初始化cuda版本的矩阵 用cudaMalloc
+    u32* debug_tensor;
+    cudaMalloc((void**)&debug_tensor, 16 * 32 * sizeof(u32));
 #endif
+
+    // 把qkvo转移到gpu上
+    MainType* query_gpu;
+    cudaMalloc((void**)&query_gpu, TOTAL_SIZE * sizeof(MainType));
+    cudaMemcpy(query_gpu, query, TOTAL_SIZE * sizeof(MainType), cudaMemcpyHostToDevice);
+    MainType* key_gpu;
+    cudaMalloc((void**)&key_gpu, TOTAL_SIZE * sizeof(MainType));
+    cudaMemcpy(key_gpu, key, TOTAL_SIZE * sizeof(MainType), cudaMemcpyHostToDevice);
+    MainType* value_gpu;
+    cudaMalloc((void**)&value_gpu, TOTAL_SIZE * sizeof(MainType));
+    cudaMemcpy(value_gpu, value, TOTAL_SIZE * sizeof(MainType), cudaMemcpyHostToDevice);
+    MainType* output_gpu;
+    cudaMalloc((void**)&output_gpu, TOTAL_SIZE * sizeof(MainType));
+    cudaMemcpy(output_gpu, output, TOTAL_SIZE * sizeof(MainType), cudaMemcpyHostToDevice);
+
 
     // 调用flash attention核函数，每个线程块128个线程
     dim3 grid_dim(SEQ_LEN / 16, HEAD_NUM, BATCH_NUM);
@@ -204,10 +220,10 @@ int main() {
         16, // MMA_N_SIZE
         16  // MMA_K_SIZE
     ><<<grid_dim, block_dim>>>(
-        query,
-        key,
-        value,
-        output,
+        query_gpu,
+        key_gpu,
+        value_gpu,
+        output_gpu,
         SEQ_LEN
 #ifdef DEBUG_FLAG
         , debug_tensor
@@ -218,10 +234,12 @@ int main() {
     // 把debug tensor复制到cpu上
     u32* debug_tensor_cpu = (u32*)malloc(16 * 32 * sizeof(u32));
     cudaMemcpy(debug_tensor_cpu, debug_tensor, 16 * 32 * sizeof(u32), cudaMemcpyDeviceToHost);
+    // 用bf16类型解释 debug_tensor
+    bf16* bf16_tensor = (bf16*)debug_tensor_cpu;
     for(u32 id_data=0;id_data<16;++id_data) {
         printf("debug_tensor[%d]:\n", id_data);
-        for(u32 id_row=0;id_row<32;++id_row) {
-            printf("%d: %x\n", id_row, debug_tensor_cpu[id_data*32 + id_row]);
+        for(u32 id_row=0;id_row<64;++id_row) {
+            printf("%d: %x\n", id_row, (u32)bf16_tensor[id_data*64 + id_row]);
         }
     }
 #endif
