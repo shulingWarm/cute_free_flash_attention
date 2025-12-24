@@ -131,26 +131,26 @@ __global__ void flash_attention(
 
 #ifdef DEBUG_FLAG
         // 将某个block里面的寄存器数据写入debug_tensor
-        if(blockIdx.x==12 && blockIdx.y==0 && blockIdx.z==0 && threadIdx.x==0) {
-            // 记录全局内存里的数据
-            for(u32 id_data=0;id_data<512;++id_data) {
-                debug_tensor[id_data] = u32_query_shared_head[id_data];
+        if(blockIdx.x==12 && blockIdx.y==0 && blockIdx.z==0 && id_warp==0) {
+            // 记录寄存器里面的数据
+            for(u32 id_data=0;id_data<U32_QUERY_THREAD_COPY_SIZE;++id_data) {
+                debug_tensor[id_data*WARP_SIZE + threadIdx.x] = query_copy_reg[id_data];
             }
         }
 #endif
 
         // 将query从寄存器复制到共享内存
-        for(u32 id_mma_loop=0;id_mma_loop<MMA_K_LOOP_NUM; ++id_mma_loop) {
-            // 遍历当前mma切片的每个block
-            for(u32 id_block=0;id_block<BLOCK_NUM_IN_HEAD; ++id_block) {
-                // 计算当前线程持有的数据在当前切片中属于哪一行
-                u32 in_block_row = ((in_warp_offset>>3) ^ (id_mma_loop&3))&3;
-                // 将数据写入到共享内存
-                u32_query_shared_head[(in_block_row + 4*id_block)*U32_HEAD_DIM + 
-                    id_mma_loop*8 + in_warp_offset&7] = 
-                    query_copy_reg[(in_block_row + 4*id_block)*2 + id_mma_loop/4];
-            }
-        }
+        // for(u32 id_mma_loop=0;id_mma_loop<MMA_K_LOOP_NUM; ++id_mma_loop) {
+        //     // 遍历当前mma切片的每个block
+        //     for(u32 id_block=0;id_block<BLOCK_NUM_IN_HEAD; ++id_block) {
+        //         // 计算当前线程持有的数据在当前切片中属于哪一行
+        //         u32 in_block_row = ((in_warp_offset>>3) ^ (id_mma_loop&3))&3;
+        //         // 将数据写入到共享内存
+        //         u32_query_shared_head[(in_block_row + 4*id_block)*U32_HEAD_DIM + 
+        //             id_mma_loop*8 + in_warp_offset&7] = 
+        //             query_copy_reg[(in_block_row + 4*id_block)*2 + id_mma_loop/4];
+        //     }
+        // }
     }
 
 
@@ -168,7 +168,7 @@ int main() {
     // 使用debug矩阵的情况下，将矩阵改成使用顺序赋值
     constexpr bool USE_DEBUG_MAT = true;
 
-    using MainType = bf16;
+    using MainType = unsigned short int;
 
     // 初始化qkvo 四个tensor，大小都相同 
     MainType* query = (MainType*)malloc(TOTAL_SIZE * sizeof(MainType));
@@ -213,6 +213,9 @@ int main() {
     // 调用flash attention核函数，每个线程块128个线程
     dim3 grid_dim(SEQ_LEN / 16, HEAD_NUM, BATCH_NUM);
     dim3 block_dim(THREAD_PER_BLOCK, 1, 1);
+
+    std::cout<<"grid size: "<<grid_dim.x<<" "<<grid_dim.y<<" "<<grid_dim.z<<std::endl;
+    std::cout<<"block size: "<<block_dim.x<<" "<<block_dim.y<<" "<<block_dim.z<<std::endl;
     flash_attention<MainType, // 数据类型
         HEAD_NUM, // 头的数量
         HEAD_DIM, // 头的维度
@@ -230,17 +233,35 @@ int main() {
 #endif
     );
 
+    // cuda的设备同步
+    cudaDeviceSynchronize();
+
 #ifdef DEBUG_FLAG
     // 把debug tensor复制到cpu上
     u32* debug_tensor_cpu = (u32*)malloc(16 * 32 * sizeof(u32));
     cudaMemcpy(debug_tensor_cpu, debug_tensor, 16 * 32 * sizeof(u32), cudaMemcpyDeviceToHost);
-    // 用bf16类型解释 debug_tensor
-    bf16* bf16_tensor = (bf16*)debug_tensor_cpu;
-    for(u32 id_data=0;id_data<16;++id_data) {
-        printf("debug_tensor[%d]:\n", id_data);
-        for(u32 id_row=0;id_row<64;++id_row) {
-            printf("%d: %x\n", id_row, (u32)bf16_tensor[id_data*64 + id_row]);
+
+
+    // 打印每个线程保有的位置
+    u32 thread_layout[8][64];
+    for(u32 id_thread=0;id_thread<32;++id_thread) {
+        // 遍历当前线程的每个数据
+        for(u32 id_data=0;id_data<16;++id_data) {
+            // 本线程在当前位置的数据指针
+            u32* thread_data_ptr = debug_tensor_cpu + id_data*32 + id_thread;
+            MainType* main_type_ptr = (MainType*)thread_data_ptr;
+            u32 thread_data = (u32)main_type_ptr[0];
+            // 计算持有数据的位置
+            thread_layout[thread_data/128][(thread_data%128)/2] = id_thread;
         }
+    }
+    // 打印layout
+    std::cout<<"thread layout:"<<std::endl;
+    for(u32 id_row=0;id_row<8;++id_row) {
+        for(u32 id_col=0;id_col<64;++id_col) {
+            std::cout<<thread_layout[id_row][id_col]<<"\t";
+        }
+        std::cout<<std::endl;
     }
 #endif
 }
