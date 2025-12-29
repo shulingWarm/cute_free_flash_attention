@@ -129,16 +129,6 @@ __global__ void flash_attention(
             }
         }
 
-#ifdef DEBUG_FLAG
-        // 将某个block里面的寄存器数据写入debug_tensor
-        if(blockIdx.x==12 && blockIdx.y==0 && blockIdx.z==0 && id_warp==0) {
-            // 记录寄存器里面的数据
-            for(u32 id_data=0;id_data<U32_QUERY_THREAD_COPY_SIZE;++id_data) {
-                debug_tensor[id_data*WARP_SIZE + threadIdx.x] = query_copy_reg[id_data];
-            }
-        }
-#endif
-
         // 将query从寄存器复制到共享内存
         for(u32 id_mma_loop=0;id_mma_loop<MMA_K_LOOP_NUM; ++id_mma_loop) {
             // 遍历当前mma切片的每个block
@@ -151,6 +141,20 @@ __global__ void flash_attention(
                     query_copy_reg[(in_block_row + 4*id_block)*2 + id_mma_loop/4];
             }
         }
+
+#ifdef DEBUG_FLAG
+        // 调用线程同步
+        __syncthreads();
+        // 将某个block里面的寄存器数据写入debug_tensor
+        if(blockIdx.x==12 && blockIdx.y==0 && blockIdx.z==0 && threadIdx.x==0) {
+            printf("begin write debug tensor\n");
+            // 把warp 0 里面的寄存器数据写入到debug_tensor
+            // 一个warp在共享内存里面负责的数据量是: 64*8 = 512
+            for(u32 id_data=0;id_data<512;++id_data) {
+                debug_tensor[id_data] = u32_query_shared_head[id_data];
+            }
+        }
+#endif
     }
 
 
@@ -241,25 +245,15 @@ int main() {
     u32* debug_tensor_cpu = (u32*)malloc(16 * 32 * sizeof(u32));
     cudaMemcpy(debug_tensor_cpu, debug_tensor, 16 * 32 * sizeof(u32), cudaMemcpyDeviceToHost);
 
-
-    // 打印每个线程保有的位置
-    u32 thread_layout[8][64];
-    for(u32 id_thread=0;id_thread<32;++id_thread) {
-        // 遍历当前线程的每个数据
-        for(u32 id_data=0;id_data<16;++id_data) {
-            // 本线程在当前位置的数据指针
-            u32* thread_data_ptr = debug_tensor_cpu + id_data*32 + id_thread;
-            MainType* main_type_ptr = (MainType*)thread_data_ptr;
-            u32 thread_data = (u32)main_type_ptr[0];
-            // 计算持有数据的位置
-            thread_layout[thread_data/128][(thread_data%128)/2] = id_thread;
-        }
-    }
-    // 打印layout
-    std::cout<<"thread layout:"<<std::endl;
+    // 打印debug tensor的内容
     for(u32 id_row=0;id_row<8;++id_row) {
-        for(u32 id_col=0;id_col<64;++id_col) {
-            std::cout<<thread_layout[id_row][id_col]<<"\t";
+        // 当前行的头指针
+        u32* row_ptr = debug_tensor_cpu + id_row * 64;
+        // 转换成main type的指针
+        MainType* main_type_ptr = (MainType*)row_ptr;
+        // 遍历打印每个数据
+        for(u32 id_data=0;id_data<128;++id_data) {
+            std::cout<<main_type_ptr[id_data]<<"\t";
         }
         std::cout<<std::endl;
     }
