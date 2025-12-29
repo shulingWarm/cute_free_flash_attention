@@ -140,17 +140,17 @@ __global__ void flash_attention(
 #endif
 
         // 将query从寄存器复制到共享内存
-        // for(u32 id_mma_loop=0;id_mma_loop<MMA_K_LOOP_NUM; ++id_mma_loop) {
-        //     // 遍历当前mma切片的每个block
-        //     for(u32 id_block=0;id_block<BLOCK_NUM_IN_HEAD; ++id_block) {
-        //         // 计算当前线程持有的数据在当前切片中属于哪一行
-        //         u32 in_block_row = ((in_warp_offset>>3) ^ (id_mma_loop&3))&3;
-        //         // 将数据写入到共享内存
-        //         u32_query_shared_head[(in_block_row + 4*id_block)*U32_HEAD_DIM + 
-        //             id_mma_loop*8 + in_warp_offset&7] = 
-        //             query_copy_reg[(in_block_row + 4*id_block)*2 + id_mma_loop/4];
-        //     }
-        // }
+        for(u32 id_mma_loop=0;id_mma_loop<MMA_K_LOOP_NUM; ++id_mma_loop) {
+            // 遍历当前mma切片的每个block
+            for(u32 id_block=0;id_block<BLOCK_NUM_IN_HEAD; ++id_block) {
+                // 计算当前线程持有的数据在当前切片中属于哪一行
+                u32 in_block_row = ((in_warp_offset>>3) ^ (id_mma_loop&3))&3;
+                // 将数据写入到共享内存
+                u32_query_shared_head[(in_block_row + 4*id_block)*U32_HEAD_DIM + 
+                    id_mma_loop*8 + (in_warp_offset&7)] = 
+                    query_copy_reg[(in_block_row + 4*id_block)*2 + id_mma_loop/4];
+            }
+        }
     }
 
 
@@ -211,7 +211,7 @@ int main() {
 
 
     // 调用flash attention核函数，每个线程块128个线程
-    dim3 grid_dim(SEQ_LEN / 16, HEAD_NUM, BATCH_NUM);
+    dim3 grid_dim(SEQ_LEN / (8*4), HEAD_NUM, BATCH_NUM);
     dim3 block_dim(THREAD_PER_BLOCK, 1, 1);
 
     std::cout<<"grid size: "<<grid_dim.x<<" "<<grid_dim.y<<" "<<grid_dim.z<<std::endl;
