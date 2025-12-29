@@ -224,7 +224,7 @@ int main() {
         HEAD_NUM, // 头的数量
         HEAD_DIM, // 头的维度
         16, // MMA_M_SIZE
-        16, // MMA_N_SIZE
+        8, // MMA_N_SIZE
         16  // MMA_K_SIZE
     ><<<grid_dim, block_dim>>>(
         query_gpu,
