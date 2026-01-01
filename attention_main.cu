@@ -7,7 +7,7 @@ using bf16 = cutlass::bfloat16_t;
 
 using u32=unsigned int;
 
-#define DEBUG_FLAG
+// #define DEBUG_FLAG
 
 // flash attention的核函数
 template<class T, // 数据类型
@@ -170,7 +170,12 @@ int main() {
     constexpr u32 THREAD_PER_BLOCK = 128;
 
     // 使用debug矩阵的情况下，将矩阵改成使用顺序赋值
-    constexpr bool USE_DEBUG_MAT = true;
+    constexpr bool USE_DEBUG_MAT = 
+#ifdef DEBUG_FLAG
+        false;
+#else
+        true;
+#endif
 
     using MainType = unsigned short int;
 
