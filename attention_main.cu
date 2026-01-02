@@ -7,7 +7,7 @@ using bf16 = cutlass::bfloat16_t;
 
 using u32=unsigned int;
 
-// #define DEBUG_FLAG
+#define DEBUG_FLAG
 
 // flash attention的核函数
 template<class T, // 数据类型
@@ -82,7 +82,7 @@ __global__ void flash_attention(
     u32 KV_LOAD_LOOP_NUM = seq_len / MMA_M_SIZE;
 #endif
     // 每个warp需要读取的行数
-    u32 KV_LOAD_ROW_NUM_PER_WARP = MMA_M_SIZE / WARP_SIZE;
+    u32 KV_LOAD_ROW_NUM_PER_WARP = MMA_M_SIZE / WARP_NUM;
     // 每个warp在每一行中需要读取的块数
     u32 KV_LOAD_ROW_BLOCK_NUM = HEAD_DIM*sizeof(T)/sizeof(u32)/WARP_SIZE; // 参考值: 128*2/4/32=2;
     // 加载KV的时候，每个线程需要加载的数据量
