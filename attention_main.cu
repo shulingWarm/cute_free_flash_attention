@@ -76,7 +76,11 @@ __global__ void flash_attention(
     constexpr u32 THREAD_REG_SIZE = MMA_A_THREAD_SIZE + MMA_B_THREAD_SIZE + MMA_C_THREAD_SIZE; // 参考值: 8+4+4=16
 
     // KV加载的周期数
+#ifdef DEBUG_FLAG
+    u32 KV_LOAD_LOOP_NUM = 1;
+#else
     u32 KV_LOAD_LOOP_NUM = seq_len / MMA_M_SIZE;
+#endif
     // 每个warp需要读取的行数
     u32 KV_LOAD_ROW_NUM_PER_WARP = MMA_M_SIZE / WARP_SIZE;
     // 每个warp在每一行中需要读取的块数
@@ -154,20 +158,6 @@ __global__ void flash_attention(
                     query_copy_reg[(in_block_row + 4*id_block)*2 + id_mma_loop/4];
             }
         }
-
-#ifdef DEBUG_FLAG
-        // 调用线程同步
-        __syncthreads();
-        // 将某个block里面的寄存器数据写入debug_tensor
-        if(blockIdx.x==12 && blockIdx.y==0 && blockIdx.z==0 && threadIdx.x==0) {
-            printf("begin write debug tensor\n");
-            // 把warp 0 里面的寄存器数据写入到debug_tensor
-            // 一个warp在共享内存里面负责的数据量是: 64*8 = 512
-            for(u32 id_data=0;id_data<512;++id_data) {
-                debug_tensor[id_data] = u32_query_shared_head[id_data];
-            }
-        }
-#endif
     }
 
     // 计算过程的主循环
@@ -178,6 +168,10 @@ __global__ void flash_attention(
             T* key_head_ptr = key + blockIdx.z * seq_len * HEAD_NUM * HEAD_DIM + 
                 blockIdx.y * seq_len * HEAD_DIM + 
                 (id_loop*MMA_M_SIZE + id_warp*(MMA_M_SIZE/WARP_NUM)) * HEAD_DIM;
+
+            // 当前warp的共享内存头指针
+            u32* u32_key_shared_head = key_shared_u32_ptr + 
+                id_warp * KV_LOAD_ROW_NUM_PER_WARP * U32_HEAD_DIM;
 
             // 用于复制全局内存的寄存器
             u32 key_copy_reg[U32_KV_LOAD_PER_THREAD];
@@ -210,6 +204,19 @@ __global__ void flash_attention(
                     in_block_row)*U32_MMA_K_SIZE + in_warp_offset%U32_MMA_K_SIZE] = 
                     key_copy_reg[in_block_row*BLOCK_NUM_IN_HEAD + id_mma_loop/4];
             }
+#ifdef DEBUG_FLAG
+            // 调用线程同步
+            __syncthreads();
+            // 将某个block里面的寄存器数据写入debug_tensor
+            if(blockIdx.x==12 && blockIdx.y==0 && blockIdx.z==0 && threadIdx.x==0) {
+                printf("begin write key debug tensor\n");
+                // 把warp 0 里面的寄存器数据写入到debug_tensor
+                // 一个warp在共享内存里面负责的数据量是: 64*8 = 512
+                for(u32 id_data=0;id_data<1024;++id_data) {
+                    debug_tensor[id_data] = u32_key_shared_head[id_data];
+                }
+            }
+#endif
         }
     } 
 }
@@ -255,7 +262,7 @@ int main() {
 #ifdef DEBUG_FLAG
     // 初始化cuda版本的矩阵 用cudaMalloc
     u32* debug_tensor;
-    cudaMalloc((void**)&debug_tensor, 16 * 32 * sizeof(u32));
+    cudaMalloc((void**)&debug_tensor, 16 * 64 * sizeof(u32));
 #endif
 
     // 把qkvo转移到gpu上
@@ -301,11 +308,11 @@ int main() {
 
 #ifdef DEBUG_FLAG
     // 把debug tensor复制到cpu上
-    u32* debug_tensor_cpu = (u32*)malloc(16 * 32 * sizeof(u32));
-    cudaMemcpy(debug_tensor_cpu, debug_tensor, 16 * 32 * sizeof(u32), cudaMemcpyDeviceToHost);
+    u32* debug_tensor_cpu = (u32*)malloc(16 * 64 * sizeof(u32));
+    cudaMemcpy(debug_tensor_cpu, debug_tensor, 16 * 64 * sizeof(u32), cudaMemcpyDeviceToHost);
 
     // 打印debug tensor的内容
-    for(u32 id_row=0;id_row<8;++id_row) {
+    for(u32 id_row=0;id_row<16;++id_row) {
         // 当前行的头指针
         u32* row_ptr = debug_tensor_cpu + id_row * 64;
         // 转换成main type的指针
