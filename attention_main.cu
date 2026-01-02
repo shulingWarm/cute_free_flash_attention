@@ -41,6 +41,8 @@ __global__ void flash_attention(
 
     constexpr u32 U32_MMA_K_SIZE = MMA_K_SIZE * sizeof(T) / sizeof(u32); // 参考值: 16*2/4=8
     constexpr u32 U32_HEAD_DIM = HEAD_DIM * sizeof(T) / sizeof(u32); // 参考值: 128*2/4=64
+    // 每个warp一次能读取几个K block
+    constexpr u32 K_BLOCK_NUM_PER_WARP = (WARP_SIZE / U32_MMA_K_SIZE); // 参考值: 32/8=4
 
     // 每次调用mma时的矩阵的大小
     constexpr u32 MMA_A_SIZE = MMA_M_SIZE * MMA_K_SIZE; // 参考值: 16*16=256
@@ -73,6 +75,15 @@ __global__ void flash_attention(
     // 执行mma计算的时候寄存器的使用量
     constexpr u32 THREAD_REG_SIZE = MMA_A_THREAD_SIZE + MMA_B_THREAD_SIZE + MMA_C_THREAD_SIZE; // 参考值: 8+4+4=16
 
+    // KV加载的周期数
+    u32 KV_LOAD_LOOP_NUM = seq_len / MMA_M_SIZE;
+    // 每个warp需要读取的行数
+    u32 KV_LOAD_ROW_NUM_PER_WARP = MMA_M_SIZE / WARP_SIZE;
+    // 每个warp在每一行中需要读取的块数
+    u32 KV_LOAD_ROW_BLOCK_NUM = HEAD_DIM*sizeof(T)/sizeof(u32)/WARP_SIZE; // 参考值: 128*2/4/32=2;
+    // 加载KV的时候，每个线程需要加载的数据量
+    constexpr u32 U32_KV_LOAD_PER_THREAD = KV_BLOCK_LOAD_SIZE/THREAD_NUM*sizeof(T)/sizeof(u32); // 参考值: 2048/128*2/4=8
+
     // 准备三个矩阵的寄存器，用于参与mma计算
     T all_reg_ptr[THREAD_REG_SIZE];
     T* mma_a_reg = all_reg_ptr;
@@ -95,6 +106,8 @@ __global__ void flash_attention(
     __shared__ T all_shared[QUERY_BLOCK_LOAD_SIZE + KV_BLOCK_LOAD_SIZE];
     // query版本的32头指针
     u32* query_shared_u32_ptr = (u32*)all_shared;
+    // key版本的32位头指针
+    u32* key_shared_u32_ptr = (u32*)(all_shared + QUERY_BLOCK_LOAD_SIZE);
 
     // 将query从全局内存复制到共享内存
     {
@@ -157,7 +170,48 @@ __global__ void flash_attention(
 #endif
     }
 
+    // 计算过程的主循环
+    for(u32 id_loop=0;id_loop<KV_LOAD_LOOP_NUM; ++id_loop) {
+        // 将key从全局内存加载到共享内存
+        {
+            // 当前轮次访问key数据的头指针
+            T* key_head_ptr = key + blockIdx.z * seq_len * HEAD_NUM * HEAD_DIM + 
+                blockIdx.y * seq_len * HEAD_DIM + 
+                (id_loop*MMA_M_SIZE + id_warp*(MMA_M_SIZE/WARP_NUM)) * HEAD_DIM;
 
+            // 用于复制全局内存的寄存器
+            u32 key_copy_reg[U32_KV_LOAD_PER_THREAD];
+
+            // 将key数据从全局内存复制到寄存器
+            // 遍历每个warp要读取的每一行
+            for(u32 id_row=0;id_row<KV_LOAD_ROW_NUM_PER_WARP; ++id_row) {
+                // 计算当前线程在当前行所在的偏移量位置
+                u32 offset_in_block = (id_row^(in_warp_offset/U32_MMA_K_SIZE))%K_BLOCK_NUM_PER_WARP;
+                // 遍历当前行的两个block
+                for(u32 id_block=0;id_block<BLOCK_NUM_IN_HEAD; ++id_block) {
+                    // 从全局内存中加载数据
+                    asm volatile(
+                        "ld.global.cg.b32 %0, [%1];\n"
+                        : "=r"(key_copy_reg[id_row*BLOCK_NUM_IN_HEAD + id_block])
+                        : "l"(key_head_ptr + 
+                            id_row*U32_HEAD_DIM + 
+                            id_block*WARP_SIZE + offset_in_block*U32_MMA_K_SIZE
+                        )
+                    );
+                }
+            }
+
+            // 将key数据从寄存器写入到共享内存
+            for(u32 id_mma_loop=0;id_mma_loop<MMA_K_LOOP_NUM; ++id_mma_loop) {
+                // 计算当前线程在当前mma切片中属于哪一行
+                u32 in_block_row = ((in_warp_offset/U32_MMA_K_SIZE)^(id_mma_loop%K_BLOCK_NUM_PER_WARP))%KV_LOAD_ROW_NUM_PER_WARP;
+                // 将寄存器的数据写入到共享内存中
+                u32_key_shared_head[(id_mma_loop*MMA_M_SIZE + id_warp +
+                    in_block_row)*U32_MMA_K_SIZE + in_warp_offset%U32_MMA_K_SIZE] = 
+                    key_copy_reg[in_block_row*BLOCK_NUM_IN_HEAD + id_mma_loop/4];
+            }
+        }
+    } 
 }
 
 int main() {
