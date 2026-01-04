@@ -168,6 +168,7 @@ __global__ void flash_attention(
             T* key_head_ptr = key + blockIdx.z * seq_len * HEAD_NUM * HEAD_DIM + 
                 blockIdx.y * seq_len * HEAD_DIM + 
                 (id_loop*MMA_M_SIZE + id_warp*(MMA_M_SIZE/WARP_NUM)) * HEAD_DIM;
+            u32* u32_key_head_ptr = (u32*)key_head_ptr;
 
             // 用于复制全局内存的寄存器
             u32 key_copy_reg[U32_KV_LOAD_PER_THREAD];
@@ -183,7 +184,7 @@ __global__ void flash_attention(
                     asm volatile(
                         "ld.global.cg.b32 %0, [%1];\n"
                         : "=r"(key_copy_reg[id_row*BLOCK_NUM_IN_HEAD + id_block])
-                        : "l"(key_head_ptr + 
+                        : "l"(u32_key_head_ptr + 
                             id_row*U32_HEAD_DIM + 
                             id_block*WARP_SIZE + offset_in_block*U32_MMA_K_SIZE
                         )
