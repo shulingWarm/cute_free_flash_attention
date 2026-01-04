@@ -169,10 +169,6 @@ __global__ void flash_attention(
                 blockIdx.y * seq_len * HEAD_DIM + 
                 (id_loop*MMA_M_SIZE + id_warp*(MMA_M_SIZE/WARP_NUM)) * HEAD_DIM;
 
-            // 当前warp的共享内存头指针
-            u32* u32_key_shared_head = key_shared_u32_ptr + 
-                id_warp * KV_LOAD_ROW_NUM_PER_WARP * U32_HEAD_DIM;
-
             // 用于复制全局内存的寄存器
             u32 key_copy_reg[U32_KV_LOAD_PER_THREAD];
 
@@ -200,7 +196,7 @@ __global__ void flash_attention(
                 // 计算当前线程在当前mma切片中属于哪一行
                 u32 in_block_row = ((in_warp_offset/U32_MMA_K_SIZE)^(id_mma_loop%K_BLOCK_NUM_PER_WARP))%KV_LOAD_ROW_NUM_PER_WARP;
                 // 将寄存器的数据写入到共享内存中
-                u32_key_shared_head[(id_mma_loop*MMA_M_SIZE + id_warp +
+                key_shared_u32_ptr[(id_mma_loop*MMA_M_SIZE + id_warp +
                     in_block_row)*U32_MMA_K_SIZE + in_warp_offset%U32_MMA_K_SIZE] = 
                     key_copy_reg[in_block_row*BLOCK_NUM_IN_HEAD + id_mma_loop/4];
             }
@@ -213,7 +209,7 @@ __global__ void flash_attention(
                 // 把warp 0 里面的寄存器数据写入到debug_tensor
                 // 一个warp在共享内存里面负责的数据量是: 64*8 = 512
                 for(u32 id_data=0;id_data<1024;++id_data) {
-                    debug_tensor[id_data] = u32_key_shared_head[id_data];
+                    debug_tensor[id_data] = key_shared_u32_ptr[id_data];
                 }
             }
 #endif
