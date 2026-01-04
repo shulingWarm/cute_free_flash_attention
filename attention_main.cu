@@ -229,9 +229,9 @@ int main() {
     // 使用debug矩阵的情况下，将矩阵改成使用顺序赋值
     constexpr bool USE_DEBUG_MAT = 
 #ifdef DEBUG_FLAG
-        false;
-#else
         true;
+#else
+        false;
 #endif
 
     using MainType = unsigned short int;
