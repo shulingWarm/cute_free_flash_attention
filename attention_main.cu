@@ -197,7 +197,7 @@ __global__ void flash_attention(
                 // 计算当前线程在当前mma切片中属于哪一行
                 u32 in_block_row = ((in_warp_offset/U32_MMA_K_SIZE)^(id_mma_loop%K_BLOCK_NUM_PER_WARP))%KV_LOAD_ROW_NUM_PER_WARP;
                 // 将寄存器的数据写入到共享内存中
-                key_shared_u32_ptr[(id_mma_loop*MMA_M_SIZE + id_warp +
+                key_shared_u32_ptr[(id_mma_loop*MMA_M_SIZE + id_warp*KV_LOAD_ROW_NUM_PER_WARP +
                     in_block_row)*U32_MMA_K_SIZE + in_warp_offset%U32_MMA_K_SIZE] = 
                     key_copy_reg[in_block_row*BLOCK_NUM_IN_HEAD + id_mma_loop/4];
             }
