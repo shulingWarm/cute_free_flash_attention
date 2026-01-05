@@ -186,7 +186,7 @@ __global__ void flash_attention(
                         : "=r"(key_copy_reg[id_row*BLOCK_NUM_IN_HEAD + id_block])
                         : "l"(u32_key_head_ptr + 
                             id_row*U32_HEAD_DIM + 
-                            id_block*WARP_SIZE + offset_in_block*U32_MMA_K_SIZE
+                            id_block*WARP_SIZE + offset_in_block*U32_MMA_K_SIZE + in_warp_offset%U32_MMA_K_SIZE
                         )
                     );
                 }
