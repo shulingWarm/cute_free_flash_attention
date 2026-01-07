@@ -39,10 +39,25 @@ __global__ void flash_attention(
     // 编译检查T的大小是2字节，目前只支持bf16和fp16
     static_assert(sizeof(T) == 2, "only bf16 and fp16 are supported");
 
+    // mma计算过程中的layout k方向的u32粒度
+    constexpr u32 K_LAYOUT_UNIT = 4;
+    // 当前warp对应的十字块的行号和列号
+    u32 four_block_row_id = id_warp % 2;
+    u32 four_block_col_id = id_warp / 2;
+
     constexpr u32 U32_MMA_K_SIZE = MMA_K_SIZE * sizeof(T) / sizeof(u32); // 参考值: 16*2/4=8
     constexpr u32 U32_HEAD_DIM = HEAD_DIM * sizeof(T) / sizeof(u32); // 参考值: 128*2/4=64
     // 每个warp一次能读取几个K block
-    constexpr u32 K_BLOCK_NUM_PER_WARP = (WARP_SIZE / U32_MMA_K_SIZE); // 参考值: 32/8=4
+    constexpr u32 K_BLOCK_NUM_PER_WARP = (WARP_SIZE / K_LAYOUT_UNIT); // 参考值: 32/4=8
+    constexpr u32 K_LAYOUT_LOOP_NUM = U32_HEAD_DIM / K_LAYOUT_UNIT; // 参考值: 64/4=16
+
+    // 每个十字块的行数和列数
+    constexpr u32 FOUR_BLOCK_ROW_SIZE_KEY = MMA_M_SIZE / 2;
+    constexpr u32 FOUR_BLOCK_COL_SIZE = U32_HEAD_DIM / 2;
+    // 每个十字块里面的unit块数
+    constexpr u32 UNIT_NUM_IN_FOUR_BLOCK = FOUR_BLOCK_COL_SIZE / K_LAYOUT_UNIT; // 参考值: 64/8=8
+    // 用static assert确保 UNIT_NUM_IN_FOUR_BLOCK 和 FOUR_BLOCK_ROW_SIZE_KEY 相同
+    static_assert(FOUR_BLOCK_ROW_SIZE_KEY == UNIT_NUM_IN_FOUR_BLOCK, "FOUR_BLOCK_ROW_SIZE_KEY must be equal to UNIT_NUM_IN_FOUR_BLOCK");
 
     // 每次调用mma时的矩阵的大小
     constexpr u32 MMA_A_SIZE = MMA_M_SIZE * MMA_K_SIZE; // 参考值: 16*16=256
@@ -168,38 +183,38 @@ __global__ void flash_attention(
             T* key_head_ptr = key + blockIdx.z * seq_len * HEAD_NUM * HEAD_DIM + 
                 blockIdx.y * seq_len * HEAD_DIM + 
                 (id_loop*MMA_M_SIZE + id_warp*(MMA_M_SIZE/WARP_NUM)) * HEAD_DIM;
-            u32* u32_key_head_ptr = (u32*)key_head_ptr;
+            u32* u32_key_head_ptr = ((u32*)key_head_ptr) + four_block_col_id*FOUR_BLOCK_COL_SIZE*MMA_M_SIZE;
+
+            // 共享内存的头指针
+            u32* warp_shared_key_head = key_shared_u32_ptr + 
+                four_block_col_id*MMA_M_SIZE*FOUR_BLOCK_COL_SIZE +
+                four_block_row_id*FOUR_BLOCK_ROW_SIZE_KEY*K_LAYOUT_UNIT;
 
             // 用于复制全局内存的寄存器
             u32 key_copy_reg[U32_KV_LOAD_PER_THREAD];
 
             // 将key数据从全局内存复制到寄存器
             // 遍历每个warp要读取的每一行
-            for(u32 id_row=0;id_row<KV_LOAD_ROW_NUM_PER_WARP; ++id_row) {
+            for(u32 id_row=0;id_row<FOUR_BLOCK_ROW_SIZE_KEY; ++id_row) {
                 // 计算当前线程在当前行所在的偏移量位置
-                u32 offset_in_block = (id_row^(in_warp_offset/U32_MMA_K_SIZE))%K_BLOCK_NUM_PER_WARP;
-                // 遍历当前行的两个block
-                for(u32 id_block=0;id_block<BLOCK_NUM_IN_HEAD; ++id_block) {
-                    // 从全局内存中加载数据
-                    asm volatile(
-                        "ld.global.cg.b32 %0, [%1];\n"
-                        : "=r"(key_copy_reg[id_row*BLOCK_NUM_IN_HEAD + id_block])
-                        : "l"(u32_key_head_ptr + 
-                            id_row*U32_HEAD_DIM + 
-                            id_block*WARP_SIZE + offset_in_block*U32_MMA_K_SIZE + in_warp_offset%U32_MMA_K_SIZE
-                        )
-                    );
-                }
+                u32 offset_in_block = (id_row^(in_warp_offset/K_LAYOUT_UNIT))%UNIT_NUM_IN_FOUR_BLOCK;
+                asm volatile(
+                    "ld.global.cg.b32 %0, [%1];\n"
+                    : "=r"(key_copy_reg[id_row])
+                    : "l"(u32_key_head_ptr + 
+                        id_row*U32_HEAD_DIM + 
+                        offset_in_block*K_LAYOUT_UNIT + in_warp_offset%K_LAYOUT_UNIT
+                    )
+                );
             }
 
             // 将key数据从寄存器写入到共享内存
-            for(u32 id_mma_loop=0;id_mma_loop<MMA_K_LOOP_NUM; ++id_mma_loop) {
+            for(u32 id_mma_loop=0;id_mma_loop<UNIT_NUM_IN_FOUR_BLOCK; ++id_mma_loop) {
                 // 计算当前线程在当前mma切片中属于哪一行
-                u32 in_block_row = ((in_warp_offset/U32_MMA_K_SIZE)^(id_mma_loop%K_BLOCK_NUM_PER_WARP))%KV_LOAD_ROW_NUM_PER_WARP;
+                u32 in_block_row = ((in_warp_offset/K_LAYOUT_UNIT)^(id_mma_loop))%FOUR_BLOCK_ROW_SIZE_KEY;
                 // 将寄存器的数据写入到共享内存中
-                key_shared_u32_ptr[(id_mma_loop*MMA_M_SIZE + id_warp*KV_LOAD_ROW_NUM_PER_WARP +
-                    in_block_row)*U32_MMA_K_SIZE + in_warp_offset%U32_MMA_K_SIZE] = 
-                    key_copy_reg[in_block_row*BLOCK_NUM_IN_HEAD + id_mma_loop/4];
+                warp_shared_key_head[(id_mma_loop*MMA_M_SIZE + 
+                    in_block_row)*K_LAYOUT_UNIT] = key_copy_reg[in_block_row];
             }
 #ifdef DEBUG_FLAG
             // 调用线程同步
@@ -215,6 +230,17 @@ __global__ void flash_attention(
             }
 #endif
         }
+
+        // 调用同步确保query key加载完成
+        // __syncthreads();
+
+        // // Q*K^T计算过程的主循环
+        // for(u32 id_qkt_loop=0;id_qkt_loop<MMA_K_LOOP_NUM;++id_qkt_loop) {
+        //     // 遍历线程要读取的每个数据
+        //     for(u32 id_read=0;id_read<MMA_A_THREAD_SIZE;++id_read) {
+                
+        //     }
+        // }
     } 
 }
 
