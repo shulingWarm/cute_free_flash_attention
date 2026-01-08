@@ -182,7 +182,7 @@ __global__ void flash_attention(
             // 当前轮次访问key数据的头指针
             T* key_head_ptr = key + blockIdx.z * seq_len * HEAD_NUM * HEAD_DIM + 
                 blockIdx.y * seq_len * HEAD_DIM + 
-                (id_loop*MMA_M_SIZE + id_warp*(MMA_M_SIZE/WARP_NUM)) * HEAD_DIM;
+                (id_loop*MMA_M_SIZE) * HEAD_DIM;
             u32* u32_key_head_ptr = ((u32*)key_head_ptr) + four_block_col_id*FOUR_BLOCK_COL_SIZE +
                 four_block_row_id*FOUR_BLOCK_ROW_SIZE_KEY*U32_HEAD_DIM;
 
@@ -207,6 +207,16 @@ __global__ void flash_attention(
                         offset_in_block*K_LAYOUT_UNIT + in_warp_offset%K_LAYOUT_UNIT
                     )
                 );
+
+                if(blockIdx.x==12 && blockIdx.y==0 && blockIdx.z==0 && threadIdx.x==32) {
+                    T* ori_key_reg = (T*)(key_copy_reg + id_row);
+                    printf("ori key: %d %d %d %d\n",
+                        id_row*U32_HEAD_DIM + 
+                        offset_in_block*K_LAYOUT_UNIT + in_warp_offset%K_LAYOUT_UNIT,
+                        offset_in_block,
+                        ori_key_reg[0], ori_key_reg[1]
+                    );
+                }
             }
 
             // 将key数据从寄存器写入到共享内存
