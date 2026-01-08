@@ -183,7 +183,8 @@ __global__ void flash_attention(
             T* key_head_ptr = key + blockIdx.z * seq_len * HEAD_NUM * HEAD_DIM + 
                 blockIdx.y * seq_len * HEAD_DIM + 
                 (id_loop*MMA_M_SIZE + id_warp*(MMA_M_SIZE/WARP_NUM)) * HEAD_DIM;
-            u32* u32_key_head_ptr = ((u32*)key_head_ptr) + four_block_col_id*FOUR_BLOCK_COL_SIZE*MMA_M_SIZE;
+            u32* u32_key_head_ptr = ((u32*)key_head_ptr) + four_block_col_id*FOUR_BLOCK_COL_SIZE +
+                four_block_row_id*FOUR_BLOCK_ROW_SIZE_KEY*U32_HEAD_DIM;
 
             // 共享内存的头指针
             u32* warp_shared_key_head = key_shared_u32_ptr + 
@@ -191,7 +192,7 @@ __global__ void flash_attention(
                 four_block_row_id*FOUR_BLOCK_ROW_SIZE_KEY*K_LAYOUT_UNIT;
 
             // 用于复制全局内存的寄存器
-            u32 key_copy_reg[U32_KV_LOAD_PER_THREAD];
+            u32 key_copy_reg[FOUR_BLOCK_ROW_SIZE_KEY];
 
             // 将key数据从全局内存复制到寄存器
             // 遍历每个warp要读取的每一行
@@ -214,7 +215,8 @@ __global__ void flash_attention(
                 u32 in_block_row = ((in_warp_offset/K_LAYOUT_UNIT)^(id_mma_loop))%FOUR_BLOCK_ROW_SIZE_KEY;
                 // 将寄存器的数据写入到共享内存中
                 warp_shared_key_head[(id_mma_loop*MMA_M_SIZE + 
-                    in_block_row)*K_LAYOUT_UNIT] = key_copy_reg[in_block_row];
+                    in_block_row)*K_LAYOUT_UNIT + in_warp_offset%K_LAYOUT_UNIT] =
+                    key_copy_reg[in_block_row];
             }
 #ifdef DEBUG_FLAG
             // 调用线程同步
@@ -329,22 +331,22 @@ int main() {
     // cuda的设备同步
     cudaDeviceSynchronize();
 
-#ifdef DEBUG_FLAG
-    // 把debug tensor复制到cpu上
-    u32* debug_tensor_cpu = (u32*)malloc(16 * 64 * sizeof(u32));
-    cudaMemcpy(debug_tensor_cpu, debug_tensor, 16 * 64 * sizeof(u32), cudaMemcpyDeviceToHost);
+// #ifdef DEBUG_FLAG
+//     // 把debug tensor复制到cpu上
+//     u32* debug_tensor_cpu = (u32*)malloc(16 * 64 * sizeof(u32));
+//     cudaMemcpy(debug_tensor_cpu, debug_tensor, 16 * 64 * sizeof(u32), cudaMemcpyDeviceToHost);
 
-    // 打印debug tensor的内容
-    for(u32 id_row=0;id_row<16;++id_row) {
-        // 当前行的头指针
-        u32* row_ptr = debug_tensor_cpu + id_row * 64;
-        // 转换成main type的指针
-        MainType* main_type_ptr = (MainType*)row_ptr;
-        // 遍历打印每个数据
-        for(u32 id_data=0;id_data<128;++id_data) {
-            std::cout<<main_type_ptr[id_data]<<"\t";
-        }
-        std::cout<<std::endl;
-    }
-#endif
+//     // 打印debug tensor的内容
+//     for(u32 id_row=0;id_row<16;++id_row) {
+//         // 当前行的头指针
+//         u32* row_ptr = debug_tensor_cpu + id_row * 64;
+//         // 转换成main type的指针
+//         MainType* main_type_ptr = (MainType*)row_ptr;
+//         // 遍历打印每个数据
+//         for(u32 id_data=0;id_data<128;++id_data) {
+//             std::cout<<main_type_ptr[id_data]<<"\t";
+//         }
+//         std::cout<<std::endl;
+//     }
+// #endif
 }
