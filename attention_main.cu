@@ -181,7 +181,6 @@ __global__ void flash_attention(
         {
             // 当前轮次访问key数据的头指针
             T* key_head_ptr = key + blockIdx.z * seq_len * HEAD_NUM * HEAD_DIM + 
-                blockIdx.y * seq_len * HEAD_DIM + 
                 (id_loop*MMA_M_SIZE) * HEAD_DIM;
             u32* u32_key_head_ptr = ((u32*)key_head_ptr) + four_block_col_id*FOUR_BLOCK_COL_SIZE +
                 four_block_row_id*FOUR_BLOCK_ROW_SIZE_KEY*U32_HEAD_DIM;
@@ -208,15 +207,15 @@ __global__ void flash_attention(
                     )
                 );
 
-                if(blockIdx.x==12 && blockIdx.y==0 && blockIdx.z==0 && threadIdx.x==32) {
-                    T* ori_key_reg = (T*)(key_copy_reg + id_row);
-                    printf("ori key: %d %d %d %d\n",
-                        id_row*U32_HEAD_DIM + 
-                        offset_in_block*K_LAYOUT_UNIT + in_warp_offset%K_LAYOUT_UNIT,
-                        offset_in_block,
-                        ori_key_reg[0], ori_key_reg[1]
-                    );
-                }
+                // if(blockIdx.x==12 && blockIdx.y==0 && blockIdx.z==0 && threadIdx.x==32) {
+                //     T* ori_key_reg = (T*)(key_copy_reg + id_row);
+                //     printf("ori key: %d %d %d %d\n",
+                //         id_row*U32_HEAD_DIM + 
+                //         offset_in_block*K_LAYOUT_UNIT + in_warp_offset%K_LAYOUT_UNIT,
+                //         offset_in_block,
+                //         ori_key_reg[0], ori_key_reg[1]
+                //     );
+                // }
             }
 
             // 将key数据从寄存器写入到共享内存
@@ -341,22 +340,22 @@ int main() {
     // cuda的设备同步
     cudaDeviceSynchronize();
 
-// #ifdef DEBUG_FLAG
-//     // 把debug tensor复制到cpu上
-//     u32* debug_tensor_cpu = (u32*)malloc(16 * 64 * sizeof(u32));
-//     cudaMemcpy(debug_tensor_cpu, debug_tensor, 16 * 64 * sizeof(u32), cudaMemcpyDeviceToHost);
+#ifdef DEBUG_FLAG
+    // 把debug tensor复制到cpu上
+    u32* debug_tensor_cpu = (u32*)malloc(16 * 64 * sizeof(u32));
+    cudaMemcpy(debug_tensor_cpu, debug_tensor, 16 * 64 * sizeof(u32), cudaMemcpyDeviceToHost);
 
-//     // 打印debug tensor的内容
-//     for(u32 id_row=0;id_row<16;++id_row) {
-//         // 当前行的头指针
-//         u32* row_ptr = debug_tensor_cpu + id_row * 64;
-//         // 转换成main type的指针
-//         MainType* main_type_ptr = (MainType*)row_ptr;
-//         // 遍历打印每个数据
-//         for(u32 id_data=0;id_data<128;++id_data) {
-//             std::cout<<main_type_ptr[id_data]<<"\t";
-//         }
-//         std::cout<<std::endl;
-//     }
-// #endif
+    // 打印debug tensor的内容
+    for(u32 id_row=0;id_row<16;++id_row) {
+        // 当前行的头指针
+        u32* row_ptr = debug_tensor_cpu + id_row * 64;
+        // 转换成main type的指针
+        MainType* main_type_ptr = (MainType*)row_ptr;
+        // 遍历打印每个数据
+        for(u32 id_data=0;id_data<128;++id_data) {
+            std::cout<<main_type_ptr[id_data]<<"\t";
+        }
+        std::cout<<std::endl;
+    }
+#endif
 }
