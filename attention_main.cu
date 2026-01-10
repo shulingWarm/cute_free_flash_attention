@@ -206,16 +206,6 @@ __global__ void flash_attention(
                         offset_in_block*K_LAYOUT_UNIT + in_warp_offset%K_LAYOUT_UNIT
                     )
                 );
-
-                // if(blockIdx.x==12 && blockIdx.y==0 && blockIdx.z==0 && threadIdx.x==32) {
-                //     T* ori_key_reg = (T*)(key_copy_reg + id_row);
-                //     printf("ori key: %d %d %d %d\n",
-                //         id_row*U32_HEAD_DIM + 
-                //         offset_in_block*K_LAYOUT_UNIT + in_warp_offset%K_LAYOUT_UNIT,
-                //         offset_in_block,
-                //         ori_key_reg[0], ori_key_reg[1]
-                //     );
-                // }
             }
 
             // 将key数据从寄存器写入到共享内存
