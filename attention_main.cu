@@ -55,7 +55,8 @@ __global__ void flash_attention(
     constexpr u32 FOUR_BLOCK_ROW_SIZE_KEY = MMA_M_SIZE / 2;
     constexpr u32 FOUR_BLOCK_COL_SIZE = U32_HEAD_DIM / 2;
     // 每个十字块里面的unit块数
-    constexpr u32 UNIT_NUM_IN_FOUR_BLOCK = FOUR_BLOCK_COL_SIZE / K_LAYOUT_UNIT; // 参考值: 64/8=8
+    constexpr u32 UNIT_NUM_IN_FOUR_BLOCK = FOUR_BLOCK_COL_SIZE / K_LAYOUT_UNIT; // 参考值: 32/4=8
+    constexpr u32 UNIT_NUM_IN_HEAD = U32_HEAD_DIM / K_LAYOUT_UNIT; // 参考值: 64/4=16
     // 用static assert确保 UNIT_NUM_IN_FOUR_BLOCK 和 FOUR_BLOCK_ROW_SIZE_KEY 相同
     static_assert(FOUR_BLOCK_ROW_SIZE_KEY == UNIT_NUM_IN_FOUR_BLOCK, "FOUR_BLOCK_ROW_SIZE_KEY must be equal to UNIT_NUM_IN_FOUR_BLOCK");
 
@@ -145,7 +146,7 @@ __global__ void flash_attention(
         // 每个线程按顺序读取数据
         for(u32 id_seq=0;id_seq<MMA_N_SIZE; ++id_seq) {
             // 计算本线程应该在当前block中处理的位置
-            u32 offset_in_block = (id_seq&3) ^ (in_warp_offset >> 3);
+            u32 offset_in_block = id_seq ^ (in_warp_offset / K_LAYOUT_UNIT);
             // 对于每个序列，遍历它的每个block
             #pragma unroll
             for(u32 id_block=0;id_block<BLOCK_NUM_IN_HEAD; ++id_block) {
@@ -155,23 +156,20 @@ __global__ void flash_attention(
                     : "l"(u32_thread_query_head + 
                         id_seq*U32_HEAD_DIM + 
                         id_block*WARP_SIZE + 
-                        offset_in_block*U32_MMA_K_SIZE + 
-                        (in_warp_offset%U32_MMA_K_SIZE))
+                        offset_in_block*K_LAYOUT_UNIT + 
+                        (in_warp_offset%K_LAYOUT_UNIT))
                 );
             }
         }
 
         // 将query从寄存器复制到共享内存
-        for(u32 id_mma_loop=0;id_mma_loop<MMA_K_LOOP_NUM; ++id_mma_loop) {
+        for(u32 id_mma_loop=0;id_mma_loop<UNIT_NUM_IN_HEAD; ++id_mma_loop) {
             // 计算当前线程持有的数据在当前切片中属于哪一行
-            u32 in_block_row = ((in_warp_offset>>3) ^ (id_mma_loop&3))&3;
-            // 遍历当前mma切片的每个block
-            for(u32 id_block=0;id_block<BLOCK_NUM_IN_HEAD; ++id_block) {
-                // 将数据写入到共享内存
-                u32_query_shared_head[(in_warp_offset&7) + in_block_row*8 + 
-                    id_block*32 + id_mma_loop*64] = 
-                    query_copy_reg[(in_block_row + 4*id_block)*2 + id_mma_loop/4];
-            }
+            u32 in_block_row = ((in_warp_offset/K_LAYOUT_UNIT) ^ (id_mma_loop%UNIT_NUM_IN_FOUR_BLOCK));
+            // 将数据写入到共享内存
+            u32_query_shared_head[(in_warp_offset%K_LAYOUT_UNIT) + 
+                (in_block_row + id_mma_loop*MMA_N_SIZE)*K_LAYOUT_UNIT] = 
+                query_copy_reg[in_block_row*BLOCK_NUM_IN_HEAD + id_mma_loop/UNIT_NUM_IN_FOUR_BLOCK];
         }
     }
 
