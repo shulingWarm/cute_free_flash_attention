@@ -178,10 +178,11 @@ __global__ void flash_attention(
         // 将某个block里面的寄存器数据写入debug_tensor
         if(blockIdx.x==12 && blockIdx.y==0 && blockIdx.z==0 && threadIdx.x==0) {
             printf("begin write key debug tensor\n");
+            u32* u32_all_shared = (u32*)all_shared;
             // 把warp 0 里面的寄存器数据写入到debug_tensor
             // 一个warp在共享内存里面负责的数据量是: 64*8 = 512
             for(u32 id_data=0;id_data<2048;++id_data) {
-                debug_tensor[id_data] = key_shared_u32_ptr[id_data];
+                debug_tensor[id_data] = u32_all_shared[id_data];
             }
         }
 #endif
