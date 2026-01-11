@@ -337,7 +337,7 @@ int main() {
     cudaMemcpy(debug_tensor_cpu, debug_tensor, DEBUG_TENSOR_SIZE * sizeof(u32), cudaMemcpyDeviceToHost);
 
     // 打印debug tensor的内容
-    for(u32 id_row=0;id_row<8;++id_row) {
+    for(u32 id_row=0;id_row<32;++id_row) {
         // 当前行的头指针
         u32* row_ptr = debug_tensor_cpu + id_row * 64;
         // 转换成main type的指针
