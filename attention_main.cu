@@ -171,6 +171,20 @@ __global__ void flash_attention(
                 (in_block_row + id_mma_loop*MMA_N_SIZE)*K_LAYOUT_UNIT] = 
                 query_copy_reg[in_block_row*BLOCK_NUM_IN_HEAD + id_mma_loop/UNIT_NUM_IN_FOUR_BLOCK];
         }
+
+#ifdef DEBUG_FLAG
+        // 调用线程同步
+        __syncthreads();
+        // 将某个block里面的寄存器数据写入debug_tensor
+        if(blockIdx.x==12 && blockIdx.y==0 && blockIdx.z==0 && threadIdx.x==0) {
+            printf("begin write key debug tensor\n");
+            // 把warp 0 里面的寄存器数据写入到debug_tensor
+            // 一个warp在共享内存里面负责的数据量是: 64*8 = 512
+            for(u32 id_data=0;id_data<2048;++id_data) {
+                debug_tensor[id_data] = key_shared_u32_ptr[id_data];
+            }
+        }
+#endif
     }
 
     // 计算过程的主循环
@@ -215,19 +229,6 @@ __global__ void flash_attention(
                     in_block_row)*K_LAYOUT_UNIT + in_warp_offset%K_LAYOUT_UNIT] =
                     key_copy_reg[in_block_row];
             }
-#ifdef DEBUG_FLAG
-            // 调用线程同步
-            __syncthreads();
-            // 将某个block里面的寄存器数据写入debug_tensor
-            if(blockIdx.x==12 && blockIdx.y==0 && blockIdx.z==0 && threadIdx.x==0) {
-                printf("begin write key debug tensor\n");
-                // 把warp 0 里面的寄存器数据写入到debug_tensor
-                // 一个warp在共享内存里面负责的数据量是: 64*8 = 512
-                for(u32 id_data=0;id_data<1024;++id_data) {
-                    debug_tensor[id_data] = key_shared_u32_ptr[id_data];
-                }
-            }
-#endif
         }
 
         // 调用同步确保query key加载完成
@@ -284,7 +285,8 @@ int main() {
 #ifdef DEBUG_FLAG
     // 初始化cuda版本的矩阵 用cudaMalloc
     u32* debug_tensor;
-    cudaMalloc((void**)&debug_tensor, 16 * 64 * sizeof(u32));
+    constexpr u32 DEBUG_TENSOR_SIZE = 32 * 64;
+    cudaMalloc((void**)&debug_tensor, DEBUG_TENSOR_SIZE * sizeof(u32));
 #endif
 
     // 把qkvo转移到gpu上
@@ -330,11 +332,11 @@ int main() {
 
 #ifdef DEBUG_FLAG
     // 把debug tensor复制到cpu上
-    u32* debug_tensor_cpu = (u32*)malloc(16 * 64 * sizeof(u32));
-    cudaMemcpy(debug_tensor_cpu, debug_tensor, 16 * 64 * sizeof(u32), cudaMemcpyDeviceToHost);
+    u32* debug_tensor_cpu = (u32*)malloc(DEBUG_TENSOR_SIZE * sizeof(u32));
+    cudaMemcpy(debug_tensor_cpu, debug_tensor, DEBUG_TENSOR_SIZE * sizeof(u32), cudaMemcpyDeviceToHost);
 
     // 打印debug tensor的内容
-    for(u32 id_row=0;id_row<16;++id_row) {
+    for(u32 id_row=0;id_row<8;++id_row) {
         // 当前行的头指针
         u32* row_ptr = debug_tensor_cpu + id_row * 64;
         // 转换成main type的指针
