@@ -36,6 +36,10 @@ __global__ void flash_attention(
     u32 id_warp = threadIdx.x / WARP_SIZE;
     u32 in_warp_offset = threadIdx.x % WARP_SIZE;
 
+    // MMA指令使用时候的行列数
+    u32 MMA_ROW_NUM = 2;
+    u32 MMA_COL_NUM = 2;
+
     // 编译检查T的大小是2字节，目前只支持bf16和fp16
     static_assert(sizeof(T) == 2, "only bf16 and fp16 are supported");
 
@@ -103,15 +107,6 @@ __global__ void flash_attention(
     u32 KV_LOAD_ROW_BLOCK_NUM = HEAD_DIM*sizeof(T)/sizeof(u32)/WARP_SIZE; // 参考值: 128*2/4/32=2;
     // 加载KV的时候，每个线程需要加载的数据量
     constexpr u32 U32_KV_LOAD_PER_THREAD = KV_BLOCK_LOAD_SIZE/THREAD_NUM*sizeof(T)/sizeof(u32); // 参考值: 2048/128*2/4=8
-
-    // 准备三个矩阵的寄存器，用于参与mma计算
-    T all_reg_ptr[THREAD_REG_SIZE];
-    T* mma_a_reg = all_reg_ptr;
-    T* mma_b_reg = mma_a_reg + MMA_A_THREAD_SIZE;
-    T* mma_c_reg = mma_b_reg + MMA_B_THREAD_SIZE;
-    u32* u32_mma_a_reg = (u32*)mma_a_reg;
-    u32* u32_mma_b_reg = (u32*)mma_b_reg;
-    u32* u32_mma_c_reg = (u32*)mma_c_reg;
 
     // 一次加载两个数据的情况下，query需要加载的次数
     constexpr u32 QUERY_THREAD_COPY_U32 = QUERY_THREAD_COPY_SIZE * sizeof(T) / sizeof(u32); // 参考值: 16*2/4=8
@@ -233,16 +228,34 @@ __global__ void flash_attention(
         }
 
         // 调用同步确保query key加载完成
-        // __syncthreads();
+        __syncthreads();
 
-        // // Q*K^T计算过程的主循环
-        // for(u32 id_qkt_loop=0;id_qkt_loop<MMA_K_LOOP_NUM;++id_qkt_loop) {
-        //     // 遍历线程要读取的每个数据
-        //     for(u32 id_read=0;id_read<MMA_A_THREAD_SIZE;++id_read) {
-                
-        //     }
-        // }
-    } 
+        // mma过程中A矩阵的寄存器
+        u32 mma_a_reg[U32_MMA_A_THREAD_SIZE];
+        // mma过程中B矩阵的寄存器
+        u32 mma_b_reg[U32_MMA_B_THREAD_SIZE];
+
+        // Q*K^T计算过程的主循环
+        for(u32 id_qkt_loop=0;id_qkt_loop<MMA_K_LOOP_NUM;++id_qkt_loop) {
+            // 当前循环层中key矩阵的头指针
+            u32* key_shared_head = (key_shared_u32_ptr) + 
+                id_qkt_loop*U32_MMA_A_THREAD_SIZE*WARP_SIZE + in_warp_offset;
+            // 当前循环层中query矩阵的头指针
+            u32* query_shared_head = (query_shared_u32_ptr) + id_warp*MMA_N_SIZE*U32_HEAD_DIM +
+                id_qkt_loop*U32_MMA_B_THREAD_SIZE*WARP_SIZE + in_warp_offset;
+            // 遍历线程要读取的每个数据
+            for(u32 id_mma_read=0;id_mma_read<U32_MMA_A_THREAD_SIZE;++id_mma_read) {
+                mma_a_red[id_mma_read] = key_shared_head[id_mma_read*WARP_SIZE];
+            }
+            // 遍历每个线程要读取的query数据
+            for(u32 id_mma_read=0;id_mma_read<U32_MMA_B_THREAD_SIZE;++id_mma_read) {
+                mma_b_red[id_mma_read] = query_shared_head[id_mma_read*WARP_SIZE];
+            }
+
+            // 执行mma计算
+            
+        }
+    }
 }
 
 int main() {
