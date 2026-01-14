@@ -81,10 +81,10 @@ __global__ void flash_attention(
     constexpr u32 U32_MMA_A_THREAD_SIZE = MMA_A_THREAD_SIZE * sizeof(u32) / sizeof(T); // 参考值: 8*2/4=4
     constexpr u32 U32_MMA_B_THREAD_SIZE = MMA_B_THREAD_SIZE * sizeof(u32) / sizeof(T); // 参考值: 4*2/4=2
     // mma的输出矩阵的寄存器
-    constexpr u32 THREAD_OUTPUT_REG_SIZE = MMA_N_SIZE*U32_HEAD_DIM/WARP_SIZE; // 参考值: 8*64/32=16
-    constexpr u32 THREAD_OUTPUT_STEP_REG = THREAD_OUTPUT_REG_SIZE/MMA_K_LOOP_NUM; // 参考值: 16/8=2
+    constexpr u32 THREAD_OUTPUT_REG_SIZE = MMA_N_SIZE*HEAD_DIM/WARP_SIZE; // 参考值: 8*128/32=32
+    constexpr u32 THREAD_OUTPUT_STEP_REG = THREAD_OUTPUT_REG_SIZE/MMA_K_LOOP_NUM; // 参考值: 32/8=4
     // 编译时检查 MMA_K_LOOP_NUM*(MMA_M_SIZE*MMA_N_SIZE)/WARP_SIZE 是否等于 THREAD_OUTPUT_REG_SIZE
-    static_assert(MMA_K_LOOP_NUM*(MMA_M_SIZE*MMA_N_SIZE)/WARP_SIZE == THREAD_OUTPUT_REG_SIZE*sizeof(u32)/sizeof(T), 
+    static_assert(MMA_K_LOOP_NUM*(MMA_M_SIZE*MMA_N_SIZE)/WARP_SIZE == THREAD_OUTPUT_REG_SIZE, 
         "THREAD_OUTPUT_REG_SIZE must be equal to MMA_K_LOOP_NUM*(MMA_M_SIZE*MMA_N_SIZE)/WARP_SIZE");
 
     // 每个线程块需要加载的query数据量
@@ -100,7 +100,7 @@ __global__ void flash_attention(
     constexpr u32 U32_QUERY_THREAD_COPY_SIZE = QUERY_THREAD_COPY_SIZE * sizeof(u32) / sizeof(T); // 参考值: 32*2/4=16
 
     // 每个线程里面mma输出矩阵的寄存器
-    u32 mma_output_reg[THREAD_OUTPUT_REG_SIZE] = {0};
+    float mma_output_reg[THREAD_OUTPUT_REG_SIZE] = {0};
 
     // KV加载的周期数
 #ifdef DEBUG_FLAG
@@ -262,7 +262,16 @@ __global__ void flash_attention(
             }
 
             // 执行mma计算
-            
+            asm volatile(
+                "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+                "{%0,  %1,  %2,  %3},"
+                "{%4,  %5,  %6,  %7},"
+                "{%8,  %9},"
+                "{%10, %11, %12, %13};\n"
+                : "=f"(d_fragment[0]), "=f"(d_fragment[1]), "=f"(d_fragment[2]), "=f"(d_fragment[3])
+                :  "r"(a_fragment[0]),  "r"(a_fragment[1]),  "r"(a_fragment[2]),  "r"(a_fragment[3]),
+                    "r"(b_fragment[0]),  "r"(b_fragment[1]),
+                    "f"(c_fragment[0]),  "f"(c_fragment[1]),  "f"(c_fragment[2]),  "f"(c_fragment[3]));
         }
     }
 }
