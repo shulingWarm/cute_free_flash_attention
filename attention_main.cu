@@ -254,11 +254,11 @@ __global__ void flash_attention(
             u32* mma_reg_curr_loop = mma_output_reg + id_qkt_loop*THREAD_OUTPUT_STEP_REG;
             // 遍历线程要读取的每个数据
             for(u32 id_mma_read=0;id_mma_read<U32_MMA_A_THREAD_SIZE;++id_mma_read) {
-                mma_a_red[id_mma_read] = key_shared_head[id_mma_read*WARP_SIZE];
+                mma_a_reg[id_mma_read] = key_shared_head[id_mma_read*WARP_SIZE];
             }
             // 遍历每个线程要读取的query数据
             for(u32 id_mma_read=0;id_mma_read<U32_MMA_B_THREAD_SIZE;++id_mma_read) {
-                mma_b_red[id_mma_read] = query_shared_head[id_mma_read*WARP_SIZE];
+                mma_b_reg[id_mma_read] = query_shared_head[id_mma_read*WARP_SIZE];
             }
 
             // 执行mma计算
