@@ -80,6 +80,12 @@ __global__ void flash_attention(
     // 用u32的形式加载时候的加载量
     constexpr u32 U32_MMA_A_THREAD_SIZE = MMA_A_THREAD_SIZE * sizeof(u32) / sizeof(T); // 参考值: 8*2/4=4
     constexpr u32 U32_MMA_B_THREAD_SIZE = MMA_B_THREAD_SIZE * sizeof(u32) / sizeof(T); // 参考值: 4*2/4=2
+    // mma的输出矩阵的寄存器
+    constexpr u32 THREAD_OUTPUT_REG_SIZE = MMA_N_SIZE*U32_HEAD_DIM/WARP_SIZE; // 参考值: 8*64/32=16
+    constexpr u32 THREAD_OUTPUT_STEP_REG = THREAD_OUTPUT_REG_SIZE/MMA_K_LOOP_NUM; // 参考值: 16/8=2
+    // 编译时检查 MMA_K_LOOP_NUM*(MMA_M_SIZE*MMA_N_SIZE)/WARP_SIZE 是否等于 THREAD_OUTPUT_REG_SIZE
+    static_assert(MMA_K_LOOP_NUM*(MMA_M_SIZE*MMA_N_SIZE)/WARP_SIZE == THREAD_OUTPUT_REG_SIZE*sizeof(u32)/sizeof(T), 
+        "THREAD_OUTPUT_REG_SIZE must be equal to MMA_K_LOOP_NUM*(MMA_M_SIZE*MMA_N_SIZE)/WARP_SIZE");
 
     // 每个线程块需要加载的query数据量
     constexpr u32 QUERY_BLOCK_LOAD_SIZE = MMA_N_SIZE * HEAD_DIM * WARP_NUM; // 参考值: 8*128*4=4096
@@ -92,8 +98,9 @@ __global__ void flash_attention(
     // 编译检查每个warp的加载量刚好等于每一组query的数据量
     static_assert(QUERY_THREAD_COPY_SIZE*sizeof(T) == MMA_N_SIZE*BLOCK_NUM_IN_HEAD*4, "QUERY_BLOCK_LOAD_SIZE must be equal to MMA_N_SIZE*BLOCK_NUM_IN_HEAD*4");
     constexpr u32 U32_QUERY_THREAD_COPY_SIZE = QUERY_THREAD_COPY_SIZE * sizeof(u32) / sizeof(T); // 参考值: 32*2/4=16
-    // 执行mma计算的时候寄存器的使用量
-    constexpr u32 THREAD_REG_SIZE = MMA_A_THREAD_SIZE + MMA_B_THREAD_SIZE + MMA_C_THREAD_SIZE; // 参考值: 8+4+4=16
+
+    // 每个线程里面mma输出矩阵的寄存器
+    u32 mma_output_reg[THREAD_OUTPUT_REG_SIZE] = {0};
 
     // KV加载的周期数
 #ifdef DEBUG_FLAG
@@ -243,6 +250,8 @@ __global__ void flash_attention(
             // 当前循环层中query矩阵的头指针
             u32* query_shared_head = (query_shared_u32_ptr) + id_warp*MMA_N_SIZE*U32_HEAD_DIM +
                 id_qkt_loop*U32_MMA_B_THREAD_SIZE*WARP_SIZE + in_warp_offset;
+            // 准备当前循环层的输出寄存器
+            u32* mma_reg_curr_loop = mma_output_reg + id_qkt_loop*THREAD_OUTPUT_STEP_REG;
             // 遍历线程要读取的每个数据
             for(u32 id_mma_read=0;id_mma_read<U32_MMA_A_THREAD_SIZE;++id_mma_read) {
                 mma_a_red[id_mma_read] = key_shared_head[id_mma_read*WARP_SIZE];
