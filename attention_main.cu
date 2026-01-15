@@ -96,7 +96,9 @@ __global__ void flash_attention(
     constexpr u32 U32_QUERY_THREAD_COPY_SIZE = QUERY_THREAD_COPY_SIZE * sizeof(u32) / sizeof(T); // 参考值: 32*2/4=16
 
     // 每个线程里面mma输出矩阵的寄存器
-    float mma_output_reg[THREAD_OUTPUT_REG_SIZE] = {0};
+    float mma_output_reg[THREAD_OUTPUT_REG_SIZE] = {0.0f};
+    // 每个线程都保有每个query上的最大值，并不断维护
+    float max_value_each_query[MMA_N_SIZE] = {0.0f};
 
     // KV加载的周期数
 #ifdef DEBUG_FLAG
