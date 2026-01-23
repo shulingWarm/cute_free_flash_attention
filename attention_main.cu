@@ -97,8 +97,15 @@ __global__ void flash_attention(
 
     // 每个线程里面mma输出矩阵的寄存器
     float mma_output_reg[THREAD_OUTPUT_REG_SIZE] = {0.0f};
+    // 每个线程维护的query数量
+    // 参考: https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-fragment-mma-16816-float
+    constexpr u32 QUERY_NUM_FOR_MMA = 2;
     // 每个线程都保有每个query上的最大值，并不断维护
-    float max_value_each_query[MMA_N_SIZE] = {0.0f};
+    float max_value_each_query[QUERY_NUM_FOR_MMA] = {0.0f};
+    // 每个线程的query值的备份，方便更新旧的output值
+    float max_value_query_bak[QUERY_NUM_FOR_MMA] = {0.0f};
+    // 每个query的attention score求和
+    float score_sum[QUERY_NUM_FOR_MMA] = {0.0f};
 
     // KV加载的周期数
 #ifdef DEBUG_FLAG
@@ -270,8 +277,35 @@ __global__ void flash_attention(
                     "f"(mma_output_reg[0]),  "f"(mma_output_reg[1]),  "f"(mma_output_reg[2]),  "f"(mma_output_reg[3]));
         }
 
-        // 然后可以开始做softmax了
+        // 维护当前的Q*K^T的最大值
+        // 先取本线程的两个数字取最大值
+        max_value_each_query[0] = max(max(mma_a_reg[0], mma_a_reg[1]), max_value_each_query[0]);
+        max_value_each_query[1] = max(max(mma_a_reg[2], mma_a_reg[3]), max_value_each_query[1]);
+        // 开始跨线程求数据最大值
+        // 固定操作两步的蝴蝶寻址
+        // 参考这里: https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-fragment-mma-16816-float
+        #pragma unroll
+        for(u32 id_step=0;id_step<2;++id_step) {
+            max_value_each_query[0] = max(max_value_each_query[0], __shfl_xor_sync(u32(-1), max_value_each_query[0], 1<<id_step));
+            max_value_each_query[1] = max(max_value_each_query[0], __shfl_xor_sync(u32(-1), max_value_each_query[1], 1<<id_step));
+        }
+
+        // 维护所有mma分数的指数和
+        // 先把本地的两个数据加起来
+        for(u32 id_query_row=0;id_query_row<QUERY_NUM_FOR_MMA;++id_query_row) {
+            // 当前query行的求和
+            float temp_sum = mma_a_reg[id_query_row*2] + mma_a_reg[id_query_row*2+1];
+        }
+
+        // 执行蝴蝶寻址，进行求和
         
+
+        // 更新query最大值的数据
+        max_value_query_bak[0] = max_value_each_query[0];
+        max_value_query_bak[1] = max_value_each_query[1];
+
+        // 然后可以开始做softmax了
+        // 
     }
 }
 
