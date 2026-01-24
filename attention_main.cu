@@ -295,13 +295,20 @@ __global__ void flash_attention(
 
         // 维护所有mma分数的指数和
         // 先把本地的两个数据加起来
+        // 注意这里用的是指数和
         for(u32 id_query_row=0;id_query_row<QUERY_NUM_FOR_MMA;++id_query_row) {
             // 当前query行的求和
-            float temp_sum = mma_a_reg[id_query_row*2] + mma_a_reg[id_query_row*2+1];
+            float temp_sum = expf(mma_a_reg[id_query_row] - max_value_each_query[id_query_row]) + 
+                expf(mma_a_reg[id_query_row+2] - max_value_each_query[1]);
+            // 用蝶形运算求和
+            #pragma unroll
+            for(u32 id_step=0;id_step<QUERY_SUM_XOR_NUM;++id_step) {
+                temp_sum += __shfl_xor_sync(u32(-1), temp_sum, QUERY_SUM_XOR[id_step]);
+            }
+            // 叠加求和的历史数据
+            score_sum[id_query_row] = score_sum[id_query_row]*
+                expf(max_value_query_bak[id_query_row] - max_value_each_query[id_query_row]) + temp_sum;
         }
-
-        // 执行蝴蝶寻址，进行求和
-        
 
         // 更新query最大值的数据
         max_value_query_bak[0] = max_value_each_query[0];
