@@ -100,6 +100,9 @@ __global__ void flash_attention(
     // 每个线程维护的query数量
     // 参考: https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-fragment-mma-16816-float
     constexpr u32 QUERY_NUM_FOR_MMA = 2;
+    // mma交换时候的步数
+    constexpr u32 QUERY_SUM_XOR[] = {4, 12, 28};
+    constexpr u32 QUERY_SUM_XOR_NUM = sizeof(QUERY_SUM_XOR)/sizeof(QUERY_SUM_XOR[0]);
     // 每个线程都保有每个query上的最大值，并不断维护
     float max_value_each_query[QUERY_NUM_FOR_MMA] = {0.0f};
     // 每个线程的query值的备份，方便更新旧的output值
@@ -279,15 +282,15 @@ __global__ void flash_attention(
 
         // 维护当前的Q*K^T的最大值
         // 先取本线程的两个数字取最大值
-        max_value_each_query[0] = max(max(mma_a_reg[0], mma_a_reg[1]), max_value_each_query[0]);
-        max_value_each_query[1] = max(max(mma_a_reg[2], mma_a_reg[3]), max_value_each_query[1]);
+        max_value_each_query[0] = max(max(mma_a_reg[0], mma_a_reg[2]), max_value_each_query[0]);
+        max_value_each_query[1] = max(max(mma_a_reg[1], mma_a_reg[3]), max_value_each_query[1]);
         // 开始跨线程求数据最大值
         // 固定操作两步的蝴蝶寻址
         // 参考这里: https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-fragment-mma-16816-float
         #pragma unroll
-        for(u32 id_step=0;id_step<2;++id_step) {
-            max_value_each_query[0] = max(max_value_each_query[0], __shfl_xor_sync(u32(-1), max_value_each_query[0], 1<<id_step));
-            max_value_each_query[1] = max(max_value_each_query[0], __shfl_xor_sync(u32(-1), max_value_each_query[1], 1<<id_step));
+        for(u32 id_step=0;id_step<QUERY_SUM_XOR_NUM;++id_step) {
+            max_value_each_query[0] = max(max_value_each_query[0], __shfl_xor_sync(u32(-1), max_value_each_query[0], QUERY_SUM_XOR[id_step]));
+            max_value_each_query[1] = max(max_value_each_query[1], __shfl_xor_sync(u32(-1), max_value_each_query[1], QUERY_SUM_XOR[id_step]));
         }
 
         // 维护所有mma分数的指数和
