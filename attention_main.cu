@@ -282,8 +282,8 @@ __global__ void flash_attention(
 
         // 维护当前的Q*K^T的最大值
         // 先取本线程的两个数字取最大值
-        max_value_each_query[0] = max(max(mma_a_reg[0], mma_a_reg[2]), max_value_each_query[0]);
-        max_value_each_query[1] = max(max(mma_a_reg[1], mma_a_reg[3]), max_value_each_query[1]);
+        max_value_each_query[0] = max(max(mma_output_reg[0], mma_output_reg[2]), max_value_each_query[0]);
+        max_value_each_query[1] = max(max(mma_output_reg[1], mma_output_reg[3]), max_value_each_query[1]);
         // 开始跨线程求数据最大值
         // 固定操作两步的蝴蝶寻址
         // 参考这里: https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-fragment-mma-16816-float
@@ -298,8 +298,8 @@ __global__ void flash_attention(
         // 注意这里用的是指数和
         for(u32 id_query_row=0;id_query_row<QUERY_NUM_FOR_MMA;++id_query_row) {
             // 当前query行的求和
-            float temp_sum = expf(mma_a_reg[id_query_row] - max_value_each_query[id_query_row]) + 
-                expf(mma_a_reg[id_query_row+2] - max_value_each_query[1]);
+            float temp_sum = expf(mma_output_reg[id_query_row] - max_value_each_query[id_query_row]) + 
+                expf(mma_output_reg[id_query_row+2] - max_value_each_query[1]);
             // 用蝶形运算求和
             #pragma unroll
             for(u32 id_step=0;id_step<QUERY_SUM_XOR_NUM;++id_step) {
@@ -313,6 +313,17 @@ __global__ void flash_attention(
         // 更新query最大值的数据
         max_value_query_bak[0] = max_value_each_query[0];
         max_value_query_bak[1] = max_value_each_query[1];
+
+        // 组织attn_score*V的过程中，N矩阵的内容
+        // 把结果存到 mma_b_reg 里面
+        // 这个地方是根据m16n8k16的情况写死的
+        #pragma unroll
+        for(u32 id_mma_read=0;id_mma_read<MMA_B_THREAD_SIZE;++id_mma_read) {
+            u32 target_tid = ((in_warp_offset & 3) << 3) | ((id_mma_read & 1) << 2) | (in_warp_offset >> 3);
+            u32 target_vid = (id_mma_read & 2) | ((in_warp_offset >> 2) & 1);
+            *((T*)mma_b_reg + id_mma_read) = __shfl_sync(u32(-1), 
+                mma_output_reg[target_vid], target_tid);
+        }
 
         // 然后可以开始做softmax了
         // 
