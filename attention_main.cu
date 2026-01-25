@@ -305,9 +305,16 @@ __global__ void flash_attention(
             for(u32 id_step=0;id_step<QUERY_SUM_XOR_NUM;++id_step) {
                 temp_sum += __shfl_xor_sync(u32(-1), temp_sum, QUERY_SUM_XOR[id_step]);
             }
+            // 后续同时需要在这里更新最终的output向量
+            // TO-DO
             // 叠加求和的历史数据
             score_sum[id_query_row] = score_sum[id_query_row]*
                 expf(max_value_query_bak[id_query_row] - max_value_each_query[id_query_row]) + temp_sum;
+        }
+
+        // 把output reg里面的数据正式换成attention score
+        for(u32 id_reg=0;id_reg<THREAD_OUTPUT_REG_SIZE;++id_reg) {
+            mma_output_reg[id_reg] = expf(mma_output_reg[id_reg] - max_value_each_query[id_reg&1]) / score_sum[id_reg&1];
         }
 
         // 更新query最大值的数据
