@@ -383,7 +383,7 @@ __global__ void flash_attention(
             // TO-DO 每一层计算都需要把output矩阵归零
             // 当前循环层中value矩阵的头指针
             u32* value_shared_head = (key_shared_u32_ptr) + 
-                id_qkt_loop*U32_MMA_A_THREAD_SIZE*WARP_SIZE + in_warp_offset;
+                id_sv_loop*U32_MMA_A_THREAD_SIZE*WARP_SIZE + in_warp_offset;
             // attention score * V 不需要读取B矩阵，它一次读取后面都是这个数据
 
             // 这里面需要一些临时的寄存器，所以弄一个临时的作用域
