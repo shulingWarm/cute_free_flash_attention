@@ -242,6 +242,8 @@ __global__ void flash_attention(
             }
         }
 
+        // TO-DO 对于Q*K^T，在首轮计算的时候需要把output矩阵清零
+
         // 调用同步确保query key加载完成
         __syncthreads();
 
@@ -332,8 +334,95 @@ __global__ void flash_attention(
                 mma_output_reg[target_vid], target_tid);
         }
 
-        // 然后可以开始做softmax了
-        // 
+        // 把value从全局内存加载到共享内存
+        // 直接把复制key的命令抄过来就可以了
+        {
+            // 当前轮次访问value数据的头指针
+            T* value_head_ptr = value + blockIdx.z * seq_len * HEAD_NUM * HEAD_DIM + 
+                (id_loop*MMA_M_SIZE) * HEAD_DIM;
+            u32* u32_value_head_ptr = ((u32*)value_head_ptr) + four_block_col_id*FOUR_BLOCK_COL_SIZE +
+                four_block_row_id*FOUR_BLOCK_ROW_SIZE_KEY*U32_HEAD_DIM;
+
+            // 共享内存的头指针
+            // 为了节省共享内存，这里就是直接用的key的共享内存
+            u32* warp_shared_value_head = key_shared_u32_ptr + 
+                four_block_col_id*MMA_M_SIZE*FOUR_BLOCK_COL_SIZE +
+                four_block_row_id*FOUR_BLOCK_ROW_SIZE_KEY*K_LAYOUT_UNIT;
+
+            // 用于复制全局内存的寄存器
+            u32 value_copy_reg[FOUR_BLOCK_ROW_SIZE_KEY];
+
+            // 将value数据从全局内存复制到寄存器
+            // 遍历每个warp要读取的每一行
+            for(u32 id_row=0;id_row<FOUR_BLOCK_ROW_SIZE_KEY; ++id_row) {
+                // 计算当前线程在当前行所在的偏移量位置
+                u32 offset_in_block = (id_row^(in_warp_offset/K_LAYOUT_UNIT))%UNIT_NUM_IN_FOUR_BLOCK;
+                asm volatile(
+                    "ld.global.cg.b32 %0, [%1];\n"
+                    : "=r"(value_copy_reg[id_row])
+                    : "l"(u32_value_head_ptr + 
+                        id_row*U32_HEAD_DIM + 
+                        offset_in_block*K_LAYOUT_UNIT + in_warp_offset%K_LAYOUT_UNIT
+                    )
+                );
+            }
+
+            // 将key数据从寄存器写入到共享内存
+            for(u32 id_mma_loop=0;id_mma_loop<UNIT_NUM_IN_FOUR_BLOCK; ++id_mma_loop) {
+                // 计算当前线程在当前mma切片中属于哪一行
+                u32 in_block_row = ((in_warp_offset/K_LAYOUT_UNIT)^(id_mma_loop))%FOUR_BLOCK_ROW_SIZE_KEY;
+                // 将寄存器的数据写入到共享内存中
+                warp_shared_value_head[(id_mma_loop*MMA_M_SIZE + 
+                    in_block_row)*K_LAYOUT_UNIT + in_warp_offset%K_LAYOUT_UNIT] =
+                    value_copy_reg[in_block_row];
+            }
+        }
+
+        // attention score * V的主循环
+        for(u32 id_sv_loop=0;id_sv_loop<MMA_K_LOOP_NUM;++id_sv_loop) {
+            // TO-DO 每一层计算都需要把output矩阵归零
+            // 当前循环层中value矩阵的头指针
+            u32* value_shared_head = (key_shared_u32_ptr) + 
+                id_qkt_loop*U32_MMA_A_THREAD_SIZE*WARP_SIZE + in_warp_offset;
+            // attention score * V 不需要读取B矩阵，它一次读取后面都是这个数据
+
+            // 这里面需要一些临时的寄存器，所以弄一个临时的作用域
+            {
+                // 用于复制mma_reg的寄存器
+                u32 mma_a_reg_temp[U32_MMA_A_THREAD_SIZE];
+                // 执行寄存器复制 但不一样的是这里会复制到临时矩阵
+                #pragma unroll
+                for(u32 id_mma_read=0;id_mma_read<U32_MMA_A_THREAD_SIZE;++id_mma_read) {
+                    mma_a_reg_temp[id_mma_read] = value_shared_head[id_mma_read*WARP_SIZE];
+                }
+                // 为了后续的寄存器计算，准备T*类型的矩阵
+                T* f16_mma_a_reg = (T*)mma_a_reg;
+                T* f16_mma_a_reg_temp = (T*)mma_a_reg_temp;
+                // 这里需要执行寄存器的交换，用来把它等效成转置后的V矩阵
+                for(u32 id_value=0;id_value<MMA_A_THREAD_SIZE;++id_value) {
+                    // 计算target的value和thread
+                    u32 target_value = 4*((id_value/2)%2) + 
+                        2*(id_value/4) + ((in_warp_offset/4)%2);
+                    u32 target_thread = 8*(in_warp_offset%4) + 4*(id_value%2) + in_warp_offset/8;
+                    // 取出对应的数值
+                    f16_mma_a_reg[id_value] = __shfl_sync(u32(-1), 
+                        f16_mma_a_reg_temp[target_value], target_thread);
+                }
+            }
+            
+
+            // 执行mma计算
+            asm volatile(
+                "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+                "{%0,  %1,  %2,  %3},"
+                "{%4,  %5,  %6,  %7},"
+                "{%8,  %9},"
+                "{%10, %11, %12, %13};\n"
+                : "=f"(mma_output_reg[0]), "=f"(mma_output_reg[1]), "=f"(mma_output_reg[2]), "=f"(mma_output_reg[3])
+                :  "r"(mma_a_reg[0]),  "r"(mma_a_reg[1]),  "r"(mma_a_reg[2]),  "r"(mma_a_reg[3]),
+                    "r"(mma_b_reg[0]),  "r"(mma_b_reg[1]),
+                    "f"(mma_output_reg[0]),  "f"(mma_output_reg[1]),  "f"(mma_output_reg[2]),  "f"(mma_output_reg[3]));
+        }
     }
 }
 
