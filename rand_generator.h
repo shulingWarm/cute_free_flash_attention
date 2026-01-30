@@ -8,14 +8,20 @@ private:
     std::mt19937 generator; // Mersenne Twister 生成器
 
 public:
-    // 构造函数：初始化生成器
-    UniformRandomGenerator() : generator(rd()) {}
+    // 构造函数：可以传入自定义种子，如果没有传入则使用随机种子
+    UniformRandomGenerator(int seed = -1) {
+        if (seed != -1) {
+            generator.seed(static_cast<unsigned int>(seed));
+        } else {
+            generator.seed(rd());
+        }
+    }
 
     // 生成指定范围内的浮点数
     double generate(double min, double max) {
         // 检查参数有效性
         if (min >= max) {
-            std::cout<<"min more than max"<<std::endl;
+            std::cout << "min more than max" << std::endl;
             throw -1;
         }
         

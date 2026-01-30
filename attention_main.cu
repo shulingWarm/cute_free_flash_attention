@@ -455,6 +455,8 @@ int main() {
 
     // 随机初始化qkv的值
     UniformRandomGenerator rand_gen;
+    // 由于后面要验证计算正确性，这里需要给它改成纯随机数
+    // 最好还是固定一下随机种子
     if (USE_DEBUG_MAT) {
         init_matrix_with_order<MainType>(query, TOTAL_SIZE, 4096);
         init_matrix_with_order<MainType>(key, TOTAL_SIZE, 4096);
@@ -520,13 +522,13 @@ int main() {
     cudaMemcpy(debug_tensor_cpu, debug_tensor, DEBUG_TENSOR_SIZE * sizeof(u32), cudaMemcpyDeviceToHost);
 
     // 打印debug tensor的内容
-    for(u32 id_row=0;id_row<32;++id_row) {
+    for(u32 id_row=0;id_row<16;++id_row) {
         // 当前行的头指针
-        u32* row_ptr = debug_tensor_cpu + id_row * 64;
+        u32* row_ptr = debug_tensor_cpu + id_row * 4;
         // 转换成main type的指针
         MainType* main_type_ptr = (MainType*)row_ptr;
         // 遍历打印每个数据
-        for(u32 id_data=0;id_data<128;++id_data) {
+        for(u32 id_data=0;id_data<8;++id_data) {
             std::cout<<main_type_ptr[id_data]<<"\t";
         }
         std::cout<<std::endl;
