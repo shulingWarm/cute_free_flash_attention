@@ -181,21 +181,6 @@ __global__ void flash_attention(
                 (in_block_row + id_mma_loop*MMA_N_SIZE)*K_LAYOUT_UNIT] = 
                 query_copy_reg[in_block_row*BLOCK_NUM_IN_HEAD + id_mma_loop/UNIT_NUM_IN_FOUR_BLOCK];
         }
-
-#ifdef DEBUG_FLAG
-        // 调用线程同步
-        __syncthreads();
-        // 将某个block里面的寄存器数据写入debug_tensor
-        if(blockIdx.x==12 && blockIdx.y==0 && blockIdx.z==0 && threadIdx.x==0) {
-            printf("begin write key debug tensor\n");
-            u32* u32_all_shared = (u32*)all_shared;
-            // 把warp 0 里面的寄存器数据写入到debug_tensor
-            // 一个warp在共享内存里面负责的数据量是: 64*8 = 512
-            for(u32 id_data=0;id_data<2048;++id_data) {
-                debug_tensor[id_data] = u32_all_shared[id_data];
-            }
-        }
-#endif
     }
 
     // 计算过程的主循环
@@ -446,7 +431,7 @@ int main() {
         false;
 #endif
 
-    using MainType = unsigned short int;
+    using MainType = bf16;
 
     // 初始化qkvo 四个tensor，大小都相同 
     MainType* query = (MainType*)malloc(TOTAL_SIZE * sizeof(MainType));
