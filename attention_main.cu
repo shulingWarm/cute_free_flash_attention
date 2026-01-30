@@ -2,10 +2,7 @@
 #include"rand_generator.h"
 #include<cuda_runtime.h>
 #include <cutlass/bfloat16.h>
-
-using bf16 = cutlass::bfloat16_t;
-
-using u32=unsigned int;
+#include"types.h"
 
 #define DEBUG_FLAG
 
