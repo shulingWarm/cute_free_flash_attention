@@ -274,9 +274,11 @@ __global__ void flash_attention(
 #ifdef DEBUG_FLAG
         // 把当前线程的计算结果存储到debug tensor里面
         if(id_warp==0 && blockIdx.x==0 && blockIdx.y==0 && blockIdx.z==0) {
+            printf("begin record debug tensor in %d\n", threadIdx.x);
+            T* output_f16_ptr = (T*)mma_output_reg;
             // 每个线程都复制两步
             for(u32 id_step=0;id_step<2;++id_step) {
-                debug_tensor[id_step*WARP_SIZE + in_warp_offset] = mma_output_reg[id_step];
+                debug_tensor[id_step*WARP_SIZE + in_warp_offset] = output_f16_ptr[id_step];
             }
         }
 #endif
@@ -454,10 +456,11 @@ int main() {
     MainType* output = (MainType*)malloc(TOTAL_SIZE * sizeof(MainType));
 
     // 随机初始化qkv的值
-    UniformRandomGenerator rand_gen;
+    UniformRandomGenerator rand_gen(5);
     // 由于后面要验证计算正确性，这里需要给它改成纯随机数
     // 最好还是固定一下随机种子
-    if (USE_DEBUG_MAT) {
+    // if (USE_DEBUG_MAT) {
+    if(false) {
         init_matrix_with_order<MainType>(query, TOTAL_SIZE, 4096);
         init_matrix_with_order<MainType>(key, TOTAL_SIZE, 4096);
         init_matrix_with_order<MainType>(value, TOTAL_SIZE, 4096);
@@ -474,6 +477,11 @@ int main() {
     constexpr u32 DEBUG_TENSOR_SIZE = 64;
     cudaMalloc((void**)&debug_tensor, DEBUG_TENSOR_SIZE * sizeof(u32));
 #endif
+
+    // 打印一下query的内容
+    for(u32 id=0;id<10;++id) {
+        std::cout<<"query["<<id<<"] = "<<(float)query[id]<<std::endl;
+    }
 
     // 把qkvo转移到gpu上
     MainType* query_gpu;
@@ -529,7 +537,7 @@ int main() {
         MainType* main_type_ptr = (MainType*)row_ptr;
         // 遍历打印每个数据
         for(u32 id_data=0;id_data<8;++id_data) {
-            std::cout<<main_type_ptr[id_data]<<"\t";
+            std::cout<<(float)main_type_ptr[id_data]<<"\t";
         }
         std::cout<<std::endl;
     }
