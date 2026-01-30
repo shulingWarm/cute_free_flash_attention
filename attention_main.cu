@@ -275,10 +275,10 @@ __global__ void flash_attention(
         // 把当前线程的计算结果存储到debug tensor里面
         if(id_warp==0 && blockIdx.x==0 && blockIdx.y==0 && blockIdx.z==0) {
             printf("begin record debug tensor in %d\n", threadIdx.x);
-            T* output_f16_ptr = (T*)mma_output_reg;
+            T* debug_tensor_f16_ptr = (T*)debug_tensor;
             // 每个线程都复制两步
-            for(u32 id_step=0;id_step<2;++id_step) {
-                debug_tensor[id_step*WARP_SIZE + in_warp_offset] = output_f16_ptr[id_step];
+            for(u32 id_step=0;id_step<4;++id_step) {
+                debug_tensor_f16_ptr[id_step*WARP_SIZE + in_warp_offset] = (T)mma_output_reg[id_step];
             }
         }
 #endif
