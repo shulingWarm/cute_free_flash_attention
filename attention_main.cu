@@ -282,6 +282,8 @@ __global__ void flash_attention(
                     "f"(mma_output_reg[0]),  "f"(mma_output_reg[1]),  "f"(mma_output_reg[2]),  "f"(mma_output_reg[3]));
         }
 
+#if 0
+
         // 维护当前的Q*K^T的最大值
         // 先取本线程的两个数字取最大值
         max_value_each_query[0] = max(max(mma_output_reg[0], mma_output_reg[2]), max_value_each_query[0]);
@@ -423,6 +425,7 @@ __global__ void flash_attention(
                     "r"(mma_b_reg[0]),  "r"(mma_b_reg[1]),
                     "f"(mma_output_reg[0]),  "f"(mma_output_reg[1]),  "f"(mma_output_reg[2]),  "f"(mma_output_reg[3]));
         }
+#endif
     }
 }
 
