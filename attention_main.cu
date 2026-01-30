@@ -238,7 +238,9 @@ __global__ void flash_attention(
         u32 mma_b_reg[U32_MMA_B_THREAD_SIZE];
 
         // Q*K^T计算过程的主循环
-        for(u32 id_qkt_loop=0;id_qkt_loop<MMA_K_LOOP_NUM;++id_qkt_loop) {
+        // 为了debug，临时把这里改成循环一次
+        // for(u32 id_qkt_loop=0;id_qkt_loop<MMA_K_LOOP_NUM;++id_qkt_loop) {
+        for(u32 id_qkt_loop=0;id_qkt_loop<1;++id_qkt_loop) {
             // 当前循环层中key矩阵的头指针
             u32* key_shared_head = (key_shared_u32_ptr) + 
                 id_qkt_loop*U32_MMA_A_THREAD_SIZE*WARP_SIZE + in_warp_offset;
@@ -246,9 +248,11 @@ __global__ void flash_attention(
             u32* query_shared_head = (query_shared_u32_ptr) + id_warp*MMA_N_SIZE*U32_HEAD_DIM +
                 id_qkt_loop*U32_MMA_B_THREAD_SIZE*WARP_SIZE + in_warp_offset;
             // 遍历线程要读取的每个数据
+            #pragma unroll
             for(u32 id_mma_read=0;id_mma_read<U32_MMA_A_THREAD_SIZE;++id_mma_read) {
                 mma_a_reg[id_mma_read] = key_shared_head[id_mma_read*WARP_SIZE];
             }
+            #pragma unroll
             // 遍历每个线程要读取的query数据
             for(u32 id_mma_read=0;id_mma_read<U32_MMA_B_THREAD_SIZE;++id_mma_read) {
                 mma_b_reg[id_mma_read] = query_shared_head[id_mma_read*WARP_SIZE];
@@ -266,6 +270,16 @@ __global__ void flash_attention(
                     "r"(mma_b_reg[0]),  "r"(mma_b_reg[1]),
                     "f"(mma_output_reg[0]),  "f"(mma_output_reg[1]),  "f"(mma_output_reg[2]),  "f"(mma_output_reg[3]));
         }
+
+#ifdef DEBUG_FLAG
+        // 把当前线程的计算结果存储到debug tensor里面
+        if(id_warp==0 && blockIdx.x==0 && blockIdx.y==0 && blockIdx.z==0) {
+            // 每个线程都复制两步
+            for(u32 id_step=0;id_step<2;++id_step) {
+                debug_tensor[id_step*WARP_SIZE + in_warp_offset] = mma_output_reg[id_step];
+            }
+        }
+#endif
 
 #if 0
 
@@ -455,7 +469,7 @@ int main() {
 #ifdef DEBUG_FLAG
     // 初始化cuda版本的矩阵 用cudaMalloc
     u32* debug_tensor;
-    constexpr u32 DEBUG_TENSOR_SIZE = 32 * 64;
+    constexpr u32 DEBUG_TENSOR_SIZE = 64;
     cudaMalloc((void**)&debug_tensor, DEBUG_TENSOR_SIZE * sizeof(u32));
 #endif
 
