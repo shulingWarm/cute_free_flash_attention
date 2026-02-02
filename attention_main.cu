@@ -3,6 +3,7 @@
 #include<cuda_runtime.h>
 #include <cutlass/bfloat16.h>
 #include"types.h"
+#include"integrate_print.h"
 
 #define DEBUG_FLAG
 
@@ -538,5 +539,9 @@ int main() {
         }
         std::cout<<std::endl;
     }
+
+    // 打印qkt的cpu计算结果
+    cpu_attention_qkt<MainType>(query, key, value, ThreadBlock(0, 0, 0), 0, SEQ_LEN,
+          HEAD_NUM, HEAD_DIM);
 #endif
 }
