@@ -45,7 +45,7 @@ void cpu_attention_qkt(T* query, T* key, T* value,
         for(u32 n=0;n<8;++n) {
             // 当前行的query
             T* curr_query_head = query_head + n*head_dim;
-            T sum = 0;
+            T sum = T(0);
             for(u32 k=0;k<16;++k) {
                 sum += curr_query_head[k] * key_head[k];
             }
