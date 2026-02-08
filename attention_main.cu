@@ -271,12 +271,15 @@ __global__ void flash_attention(
 
 #ifdef DEBUG_FLAG
         // 把当前线程的计算结果存储到debug tensor里面
-        if(id_warp==0 && blockIdx.x==0 && blockIdx.y==0 && blockIdx.z==0) {
+        if(id_warp==2 && blockIdx.x==7 && blockIdx.y==14 && blockIdx.z==0) {
             printf("begin record debug tensor in %d\n", threadIdx.x);
             T* debug_tensor_f16_ptr = (T*)debug_tensor;
             // 每个线程都复制两步
             for(u32 id_step=0;id_step<4;++id_step) {
-                debug_tensor_f16_ptr[id_step*WARP_SIZE + in_warp_offset] = (T)mma_output_reg[id_step];
+                // 当前位置的rid
+                u32 rid = (id_step/2)*8 + in_warp_offset/4;
+                u32 cid = (in_warp_offset%4)*2 + id_step%2;
+                debug_tensor_f16_ptr[rid*8 + cid] = (T)mma_output_reg[id_step];
             }
         }
 #endif
@@ -541,7 +544,7 @@ int main() {
     }
 
     // 打印qkt的cpu计算结果
-    cpu_attention_qkt<MainType>(query, key, value, ThreadBlock(0, 0, 0), 0, SEQ_LEN,
+    cpu_attention_qkt<MainType>(query, key, value, ThreadBlock(7, 14, 0), 2, SEQ_LEN,
           HEAD_NUM, HEAD_DIM);
 #endif
 }
